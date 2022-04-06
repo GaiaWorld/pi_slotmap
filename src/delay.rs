@@ -1196,7 +1196,7 @@ mod serialize {
                 .iter()
                 .map(|slot| SerdeSlot {
                     value: if slot.version % 2 == 1 {
-                        self.values.get(slot.idx_or_free as usize)
+                        self.values.get(slot.idx as usize)
                     } else {
                         None
                     },
@@ -1227,7 +1227,7 @@ mod serialize {
             let mut values = Vec::new();
             let mut slots = Vec::new();
             slots.push(Slot {
-                idx_or_free: 0,
+                idx: 0,
                 version: 0,
             });
 
@@ -1244,22 +1244,26 @@ mod serialize {
                     values.push(value);
                     slots.push(Slot {
                         version: serde_slot.version,
-                        idx_or_free: (keys.len() - 1) as u32,
+                        idx: (keys.len() - 1) as u32,
                     });
                 } else {
                     slots.push(Slot {
                         version: serde_slot.version,
-                        idx_or_free: next_free as u32,
+                        idx: next_free as u32,
                     });
                     next_free = i;
                 }
             }
-
-            Ok(DenseSlotMap {
+			
+            Ok(DelaySlotMap {
                 keys,
                 values,
                 slots,
                 free_head: next_free as u32,
+
+				// TODO
+				free_vec: Vec::new(),
+				alloc_count:AtomicU32::new(0), 
             })
         }
     }
