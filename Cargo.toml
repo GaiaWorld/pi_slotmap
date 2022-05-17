@@ -1,6 +1,6 @@
 [package]
 name = "pi_slotmap"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "Slotmap data structure"
