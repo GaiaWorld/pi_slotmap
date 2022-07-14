@@ -9,6 +9,7 @@
 use std::convert::TryFrom;
 #[cfg(all(nightly, any(doc, feature = "unstable")))]
 use alloc::collections::TryReserveError;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::iter::FusedIterator;
 #[allow(unused_imports)] // MaybeUninit is only used on nightly at the moment.
@@ -40,7 +41,7 @@ pub struct DelaySlotMap<K: Key, V> {
     slots: Vec<Slot>,
     free_head: u32,
 
-	free_vec: Vec<u32>,
+	free_vec: VecDeque<u32>,
 	alloc_count: AtomicU32,
 }
 
@@ -124,7 +125,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
             slots,
             free_head: 1,
 
-			free_vec: Vec::with_capacity(0),
+			free_vec: VecDeque::with_capacity(0),
 			alloc_count: AtomicU32::new(0),
         }
     }
@@ -136,7 +137,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
         let n = self.alloc_count.fetch_add(1, Ordering::Relaxed);
         if n < self.free_vec.len() as u32 {
             // Allocate from the freelist.
-            let id = self.free_vec[(n - 1) as usize];
+            let id = self.free_vec[n as usize];
             K::from(KeyData::new(id, self.slots[id as usize].version | 1))
         } else {
             // Grab a new ID, outside the range of `meta.len()`. `flush()` must
@@ -171,8 +172,8 @@ impl<K: Key, V> DelaySlotMap<K, V> {
         let alloc_count = self.alloc_count.get_mut();
         let current_alloc_count = *alloc_count as usize;
 
-		let count1;
-		let count2;
+		let count1; // 当前释放的空位的数量
+		let count2; // 除空位以外，还需额外的分配数量
 		if current_alloc_count > self.free_vec.len() {
 			count1 = self.free_vec.len();
 			count2 = current_alloc_count - count1;
@@ -180,9 +181,9 @@ impl<K: Key, V> DelaySlotMap<K, V> {
 			count1 = current_alloc_count;
 			count2 = 0;
 		}
-		let len = self.free_vec.len();
-		for i in 1..count1 + 1 {
-			let index = self.free_vec[len - i];
+
+		for _i in 0..count1 {
+			let index = self.free_vec[0];
 			init(self, K::from(KeyData::new(index, self.slots[index as usize].version | 1)));
 		}
 
@@ -191,9 +192,8 @@ impl<K: Key, V> DelaySlotMap<K, V> {
 			let index = len + i;
 			init(self, K::from(KeyData::new(index as u32, 1)));
 		}
-
-		let new_len = self.free_vec.len() - count1;
-        self.free_vec.set_len(new_len);
+		// let new_len = self.free_vec.len() - count1;
+        // self.free_vec.set_len(new_len);
 		self.alloc_count.swap(0, Ordering::Relaxed);
     }
 
@@ -327,7 +327,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// let key = sm.insert(42);
     /// assert_eq!(sm[key], 42);
     /// ```
-    #[inline(always)]
+    // #[inline(always)]
     pub fn insert(&mut self, value: V) -> K {
 		self.verify_flushed();
         unsafe { self.try_insert_with_key::<_, Never>(move |_| Ok(value)).unwrap_unchecked_() }
@@ -350,7 +350,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// let key = sm.insert_with_key(|k| (k, 20));
     /// assert_eq!(sm[key], (key, 20));
     /// ```
-    #[inline(always)]
+    // #[inline(always)]
     pub fn insert_with_key<F>(&mut self, f: F) -> K
     where
         F: FnOnce(K) -> V,
@@ -387,7 +387,8 @@ impl<K: Key, V> DelaySlotMap<K, V> {
             panic!("DenseSlotMap number of elements overflow");
         }
 
-		let idx = self.free_vec.pop();
+		
+		let idx = self.free_vec.pop_front();
 //         let idx = self.free_head;
 // idx
 		if let Some(idx) = idx {
@@ -402,7 +403,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
             // slot.idx_or_free = self.keys.len() as u32 - 1;
             slot.version = occupied_version;
 
-			slot.idx = idx;
+			slot.idx = (self.keys.len() - 1) as u32;
             return Ok(key);
 		}
 
@@ -419,13 +420,13 @@ impl<K: Key, V> DelaySlotMap<K, V> {
 
     // Helper function to add a slot to the freelist. Returns the index that
     // was stored in the slot.
-    #[inline(always)]
+    // #[inline(always)]
     fn free_slot(&mut self, slot_idx: usize) -> u32 {
         let slot = &mut self.slots[slot_idx];
         let value_idx = slot.idx;
         slot.version = slot.version.wrapping_add(1);
 		slot.idx = self.free_vec.len() as u32;
-		self.free_vec.push(slot_idx as u32);
+		self.free_vec.push_back(slot_idx as u32);
         
         self.free_head = slot_idx as u32;
         value_idx
@@ -433,7 +434,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
 
     // Helper function to remove a value from a slot and make the slot free.
     // Returns the value removed.
-    #[inline(always)]
+    // #[inline(always)]
     fn remove_from_slot(&mut self, slot_idx: usize) -> V {
         let value_idx = self.free_slot(slot_idx);
 
@@ -1244,7 +1245,7 @@ mod serialize {
                     values.push(value);
                     slots.push(Slot {
                         version: serde_slot.version,
-                        idx: (keys.len() - 1) as u32,
+                        idx: keys.len() as u32 - 1,
                     });
                 } else {
                     slots.push(Slot {
@@ -1262,7 +1263,7 @@ mod serialize {
                 free_head: next_free as u32,
 
 				// TODO
-				free_vec: Vec::new(),
+				free_vec: VecDeque::new(),
 				alloc_count:AtomicU32::new(0), 
             })
         }
