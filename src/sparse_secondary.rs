@@ -559,7 +559,8 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
                     // invalid, since keys always have an odd version. This
                     // gives us a linear time disjointness check.
                     ptrs[i] = MaybeUninit::new(&mut *value);
-                    *version ^= 1;
+					// 暂时设置为u32的最大值， 因此，如果真的有一个版本号u32最大值的key，这里实际上存在bug，无法正确比较key是否相交
+                    *version = std::u32::MAX;
                 },
 
                 _ => break,

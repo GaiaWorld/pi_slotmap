@@ -1,4 +1,5 @@
 //! Contains the secondary map implementation.
+//! 修改： 非空槽位不一定是基数，也可以是偶数（不在配合slotmap使用）
 
 #[cfg(all(nightly, any(doc, feature = "unstable")))]
 use alloc::collections::TryReserveError;
@@ -30,7 +31,7 @@ impl<T> Slot<T> {
     pub fn new_occupied(version: u32, value: T) -> Self {
         Occupied {
             value,
-            version: unsafe { NonZeroU32::new_unchecked(version | 1u32) },
+            version: unsafe { NonZeroU32::new_unchecked(version) },
         }
     }
 
@@ -602,7 +603,8 @@ impl<K: Key, V> SecondaryMap<K, V> {
                     // gives us a linear time disjointness check.
                     ptrs[i] = MaybeUninit::new(&mut *value);
                     slot_versions[i] = MaybeUninit::new(version.get());
-                    *version = NonZeroU32::new(2).unwrap();
+					// 暂时设置为u32的最大值， 因此，如果真的有一个版本号u32最大值的key，这里实际上存在bug，无法正确比较key是否相交
+                    *version = NonZeroU32::new(std::u32::MAX).unwrap();
                 },
 
                 _ => break,
@@ -1588,10 +1590,10 @@ mod serialize {
             D: Deserializer<'de>,
         {
             let serde_slot: SerdeSlot<T> = Deserialize::deserialize(deserializer)?;
-            let occupied = serde_slot.version % 2 == 1;
-            if occupied ^ serde_slot.value.is_some() {
-                return Err(de::Error::custom(&"inconsistent occupation in Slot"));
-            }
+            // let occupied = serde_slot.version % 2 == 1;
+            // if occupied ^ serde_slot.value.is_some() {
+            //     return Err(de::Error::custom(&"inconsistent occupation in Slot"));
+            // }
 
             Ok(match serde_slot.value {
                 Some(value) => Self::new_occupied(serde_slot.version, value),
