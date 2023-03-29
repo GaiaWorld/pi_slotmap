@@ -224,7 +224,6 @@ pub mod sparse_secondary;
 pub(crate) mod util;
 
 use core::fmt::{self, Debug, Formatter};
-use core::num::NonZeroU32;
 
 #[doc(inline)]
 pub use crate::basic::SlotMap;
@@ -261,7 +260,7 @@ impl<T> Slottable for T {}
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyData {
     idx: u32,
-    version: NonZeroU32,
+    version: u32,
 }
 
 impl KeyData {
@@ -270,7 +269,14 @@ impl KeyData {
 
         Self {
             idx,
-            version: unsafe { NonZeroU32::new_unchecked(version | 1) },
+            version: version | 1,
+        }
+    }
+
+	fn new_act(idx: u32, version: u32) -> Self {
+        Self {
+            idx,
+            version: version,
         }
     }
 
@@ -297,21 +303,21 @@ impl KeyData {
     ///
     /// [`serde`]: crate#serialization-through-serde-no_std-support-and-unstable-features
     pub fn as_ffi(self) -> u64 {
-        (u64::from(self.version.get()) << 32) | u64::from(self.idx)
+        (u64::from(self.version) << 32) | u64::from(self.idx)
     }
 
     /// Iff `value` is a value received from `k.as_ffi()`, returns a key equal
     /// to `k`. Otherwise the behavior is safe but unspecified.
     pub fn from_ffi(value: u64) -> Self {
         let idx = value & 0xffff_ffff;
-        let version = (value >> 32) | 1; // Ensure version is odd.
-        Self::new(idx as u32, version as u32)
+        let version = value >> 32; // Ensure version is odd.
+        Self::new_act(idx as u32, version as u32)
     }
 }
 
 impl Debug for KeyData {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}v{}", self.idx, self.version.get())
+        write!(f, "{}v{}", self.idx, self.version)
     }
 }
 
@@ -530,7 +536,7 @@ mod serialize {
         {
             let ser_key = SerKey {
                 idx: self.idx,
-                version: self.version.get(),
+                version: self.version,
             };
             ser_key.serialize(serializer)
         }
@@ -639,6 +645,6 @@ mod tests {
         // Even if a malicious entity sends up even (unoccupied) versions in the
         // key, we make the version point to the occupied version.
         let malicious: KeyData = serde_json::from_str(&r#"{"idx":0,"version":4}"#).unwrap();
-        assert_eq!(malicious.version.get(), 5);
+        assert_eq!(malicious.version, 5);
     }
 }

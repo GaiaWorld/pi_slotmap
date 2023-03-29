@@ -249,7 +249,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
     /// ```
     pub fn contains_key(&self, key: K) -> bool {
         let kd = key.data();
-        self.slots.get(&kd.idx).map_or(false, |slot| slot.version == kd.version.get())
+        self.slots.get(&kd.idx).map_or(false, |slot| slot.version == kd.version)
     }
 
     /// Inserts a value into the secondary map at the given `key`. Can silently
@@ -279,17 +279,17 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         let kd = key.data();
 
         if let Some(slot) = self.slots.get_mut(&kd.idx) {
-            if slot.version == kd.version.get() {
+            if slot.version == kd.version {
                 return Some(std::mem::replace(&mut slot.value, value));
             }
 
             // Don't replace existing newer values.
-            if is_older_version(kd.version.get(), slot.version) {
+            if is_older_version(kd.version, slot.version) {
                 return None;
             }
 
             *slot = Slot {
-                version: kd.version.get(),
+                version: kd.version,
                 value,
             };
 
@@ -297,7 +297,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         }
 
         self.slots.insert(kd.idx, Slot {
-            version: kd.version.get(),
+            version: kd.version,
             value,
         });
 
@@ -334,7 +334,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         let kd = key.data();
 
         if let hash_map::Entry::Occupied(entry) = self.slots.entry(kd.idx) {
-            if entry.get().version == kd.version.get() {
+            if entry.get().version == kd.version {
                 return Some(entry.remove_entry().1.value);
             }
         }
@@ -371,7 +371,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         F: FnMut(K, &mut V) -> bool,
     {
         self.slots.retain(|&idx, slot| {
-            let key = KeyData::new(idx, slot.version).into();
+            let key = KeyData::new_act(idx, slot.version).into();
             f(key, &mut slot.value)
         })
     }
@@ -441,7 +441,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         let kd = key.data();
         self.slots
             .get(&kd.idx)
-            .filter(|slot| slot.version == kd.version.get())
+            .filter(|slot| slot.version == kd.version)
             .map(|slot| &slot.value)
     }
 
@@ -489,7 +489,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         let kd = key.data();
         self.slots
             .get_mut(&kd.idx)
-            .filter(|slot| slot.version == kd.version.get())
+            .filter(|slot| slot.version == kd.version)
             .map(|slot| &mut slot.value)
     }
 
@@ -553,7 +553,7 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
             let kd = keys[i].data();
 
             match self.slots.get_mut(&kd.idx) {
-                Some(Slot { version, value }) if *version == kd.version.get() => {
+                Some(Slot { version, value }) if *version == kd.version => {
                     // This key is valid, and the slot is occupied. Temporarily
                     // make the version even so duplicate keys would show up as
                     // invalid, since keys always have an odd version. This
@@ -783,9 +783,9 @@ impl<K: Key, V, S: hash::BuildHasher> SparseSecondaryMap<K, V, S> {
         // Until we can map an OccupiedEntry to a VacantEntry I don't think
         // there is a way to avoid this extra lookup.
         if let hash_map::Entry::Occupied(o) = self.slots.entry(kd.idx) {
-            if o.get().version != kd.version.get() {
+            if o.get().version != kd.version {
                 // Which is outdated, our key or the slot?
-                if is_older_version(o.get().version, kd.version.get()) {
+                if is_older_version(o.get().version, kd.version) {
                     o.remove();
                 } else {
                     return None;
@@ -1269,7 +1269,7 @@ impl<'a, K: Key, V> VacantEntry<'a, K, V> {
         &mut self
             .inner
             .insert(Slot {
-                version: self.kd.version.get(),
+                version: self.kd.version,
                 value,
             })
             .value
@@ -1368,7 +1368,7 @@ impl<'a, K: Key, V> Iterator for Drain<'a, K, V> {
 
     fn next(&mut self) -> Option<(K, V)> {
         self.inner.next().map(|(idx, slot)| {
-            let key = KeyData::new(idx, slot.version).into();
+            let key = KeyData::new_act(idx, slot.version).into();
             (key, slot.value)
         })
     }
@@ -1389,7 +1389,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
 
     fn next(&mut self) -> Option<(K, V)> {
         self.inner.next().map(|(idx, slot)| {
-            let key = KeyData::new(idx, slot.version).into();
+            let key = KeyData::new_act(idx, slot.version).into();
             (key, slot.value)
         })
     }
@@ -1404,7 +1404,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
 
     fn next(&mut self) -> Option<(K, &'a V)> {
         self.inner.next().map(|(&idx, slot)| {
-            let key = KeyData::new(idx, slot.version).into();
+            let key = KeyData::new_act(idx, slot.version).into();
             (key, &slot.value)
         })
     }
@@ -1419,7 +1419,7 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
 
     fn next(&mut self) -> Option<(K, &'a mut V)> {
         self.inner.next().map(|(&idx, slot)| {
-            let key = KeyData::new(idx, slot.version).into();
+            let key = KeyData::new_act(idx, slot.version).into();
             (key, &mut slot.value)
         })
     }

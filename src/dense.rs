@@ -231,7 +231,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.idx as usize)
-            .map_or(false, |slot| slot.version == kd.version.get())
+            .map_or(false, |slot| slot.version == kd.version)
     }
 
     /// Inserts a value into the slot map. Returns a unique key that can be used
@@ -487,7 +487,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version.get())
+            .filter(|slot| slot.version == kd.version)
             .map(|slot| unsafe {
                 // This is safe because we only store valid indices.
                 let idx = slot.idx_or_free as usize;
@@ -536,7 +536,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version.get())
+            .filter(|slot| slot.version == kd.version)
             .map(|slot| slot.idx_or_free as usize)
             .map(move |idx| unsafe {
                 // This is safe because we only store valid indices.
