@@ -1,5 +1,5 @@
 //! Contains the secondary map implementation.
-//! 修改： 非空槽位不一定是基数，也可以是偶数（不在配合slotmap使用）
+//! 修改： 非空槽位不一定是奇数，也可以是偶数（不在配合slotmap使用）
 
 #[cfg(all(nightly, any(doc, feature = "unstable")))]
 use alloc::collections::TryReserveError;
