@@ -225,6 +225,8 @@ pub(crate) mod util;
 
 use core::fmt::{self, Debug, Formatter};
 
+use pi_null::Null;
+
 #[doc(inline)]
 pub use crate::basic::SlotMap;
 #[doc(inline)]
@@ -514,6 +516,16 @@ macro_rules! __serialize_key {
 new_key_type! {
     /// The default slot map key type.
     pub struct DefaultKey;
+}
+
+impl Null for DefaultKey {
+    fn null() -> Self {
+		Self::from(KeyData::null())
+    }
+
+    fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
 }
 
 // Serialization with serde.
