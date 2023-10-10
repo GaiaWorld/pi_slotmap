@@ -224,7 +224,7 @@ pub mod sparse_secondary;
 pub(crate) mod util;
 
 
-pub use pi_key_alloter::{new_key_type, Key, DefaultKey, is_older_version};
+pub use pi_key_alloter::{new_key_type, Key, DefaultKey, KeyData, is_older_version};
 
 #[doc(inline)]
 pub use crate::basic::SlotMap;
