@@ -5,15 +5,6 @@ use core::hint::unreachable_unchecked;
 #[derive(Debug)]
 pub enum Never {}
 
-/// Returns if a is an older version than b, taking into account wrapping of
-/// versions.
-pub fn is_older_version(a: u32, b: u32) -> bool {
-	if b == std::u32::MAX {
-		return false;
-	}
-    let diff = a.wrapping_sub(b);
-    diff >= (1 << 31)
-}
 
 /// An unwrapper that checks on debug, doesn't check on release.
 /// UB if unwrapped on release mode when unwrap would panic.

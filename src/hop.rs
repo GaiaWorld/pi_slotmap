@@ -26,7 +26,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
 use crate::util::{Never, UnwrapUnchecked};
-use pi_key_alloter::{DefaultKey, Key, KeyData, key_data};
+use pi_key_alloter::{DefaultKey, Key, key_data};
 
 // Metadata to maintain the freelist.
 #[derive(Clone, Copy, Debug)]

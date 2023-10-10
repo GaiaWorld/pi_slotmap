@@ -14,7 +14,7 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
 use crate::util::{Never, UnwrapUnchecked};
-use pi_key_alloter::{DefaultKey, Key, KeyData, key_data};
+use pi_key_alloter::{DefaultKey, Key, key_data};
 
 // Storage inside a slot or metadata for the freelist when vacant.
 union SlotUnion<T> {

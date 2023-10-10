@@ -12,7 +12,7 @@ use core::mem::replace;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
-use pi_key_alloter::{is_older_version, DefaultKey, Key, KeyData, key_data};
+use pi_key_alloter::{is_older_version, Key, KeyData, key_data};
 
 // This representation works because we don't have to store the versions
 // of removed elements.

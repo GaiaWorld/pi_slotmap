@@ -10,8 +10,8 @@ use std::iter::{Extend, FromIterator, FusedIterator};
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
-use pi_key_alloter::{DefaultKey, Key, KeyData, key_data, is_older_version};
-use crate::util::{UnwrapUnchecked};
+use pi_key_alloter::{Key, KeyData, key_data, is_older_version};
+use crate::util::UnwrapUnchecked;
 
 #[derive(Debug, Clone)]
 struct Slot<T> {

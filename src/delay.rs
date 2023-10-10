@@ -18,7 +18,7 @@ use core::ops::{Index, IndexMut};
 use std::sync::atomic::{Ordering, AtomicU32};
 
 use crate::util::{Never, UnwrapUnchecked};
-use pi_key_alloter::{DefaultKey, Key, KeyData, key_data};
+use pi_key_alloter::{DefaultKey, Key, key_data};
 
 // A slot, which represents storage for an index and a current version.
 // Can be occupied or vacant.
