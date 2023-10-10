@@ -258,51 +258,6 @@ impl<T> Slottable for T {}
 // #[doc(hidden)]
 // pub type DefaultKey = DefaultKey1;
 
-
-// Serialization with serde.
-#[cfg(feature = "serde")]
-mod serialize {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    use super::*;
-
-    #[derive(Serialize, Deserialize)]
-    pub struct SerKey {
-        idx: u32,
-        version: u32,
-    }
-
-    impl Serialize for KeyData {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let ser_key = SerKey {
-                idx: self.idx,
-                version: self.version,
-            };
-            ser_key.serialize(serializer)
-        }
-    }
-
-    impl<'de> Deserialize<'de> for KeyData {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            let mut ser_key: SerKey = Deserialize::deserialize(deserializer)?;
-
-            // Ensure a.is_null() && b.is_null() implies a == b.
-            if ser_key.idx == core::u32::MAX {
-                ser_key.version = 1;
-            }
-
-            ser_key.version |= 1; // Ensure version is odd.
-            Ok(Self::new(ser_key.idx, ser_key.version))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     // Intentionally no `use super::*;` because we want to test macro expansion
