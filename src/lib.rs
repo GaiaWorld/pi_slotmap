@@ -343,6 +343,6 @@ mod tests {
         // Even if a malicious entity sends up even (unoccupied) versions in the
         // key, we make the version point to the occupied version.
         let malicious: KeyData = serde_json::from_str(&r#"{"idx":0,"version":4}"#).unwrap();
-        assert_eq!(malicious.version, 5);
+        assert_eq!(malicious.version(), 5);
     }
 }
