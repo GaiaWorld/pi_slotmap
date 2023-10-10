@@ -15,7 +15,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
 use crate::util::{Never, UnwrapUnchecked};
-use crate::{DefaultKey, Key, KeyData};
+use pi_key_alloter::{DefaultKey, Key, KeyData, key_data};
 
 // A slot, which represents storage for an index and a current version.
 // Can be occupied or vacant.
@@ -230,8 +230,8 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     pub fn contains_key(&self, key: K) -> bool {
         let kd = key.data();
         self.slots
-            .get(kd.idx as usize)
-            .map_or(false, |slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .map_or(false, |slot| slot.version == kd.version())
     }
 
     /// Inserts a value into the slot map. Returns a unique key that can be used
@@ -313,7 +313,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
 
         if let Some(slot) = self.slots.get_mut(idx as usize) {
             let occupied_version = slot.version | 1;
-            let key = KeyData::new(idx, occupied_version).into();
+            let key = unsafe { key_data(idx, occupied_version).into() };
 
             // Push value before adjusting slots/freelist in case f panics or returns an error.
             self.values.push(f(key)?);
@@ -325,7 +325,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
         }
 
         // Push value before adjusting slots/freelist in case f panics or returns an error.
-        let key = KeyData::new(idx, 1).into();
+        let key = unsafe { key_data(idx, 1).into() };
         self.values.push(f(key)?);
         self.keys.push(key);
         self.slots.push(Slot {
@@ -360,7 +360,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
 
         // Did something take our place? Update its slot to new position.
         if let Some(k) = self.keys.get(value_idx as usize) {
-            self.slots[k.data().idx as usize].idx_or_free = value_idx;
+            self.slots[k.data().index() as usize].idx_or_free = value_idx;
         }
 
         value
@@ -381,7 +381,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     pub fn remove(&mut self, key: K) -> Option<V> {
         let kd = key.data();
         if self.contains_key(kd.into()) {
-            Some(self.remove_from_slot(kd.idx as usize))
+            Some(self.remove_from_slot(kd.index() as usize))
         } else {
             None
         }
@@ -418,7 +418,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
         while i < self.keys.len() {
             let (should_keep, slot_idx) = {
                 let (kd, mut value) = (self.keys[i].data(), &mut self.values[i]);
-                (f(kd.into(), &mut value), kd.idx as usize)
+                (f(kd.into(), &mut value), kd.index() as usize)
             };
 
             if should_keep {
@@ -486,8 +486,8 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     pub fn get(&self, key: K) -> Option<&V> {
         let kd = key.data();
         self.slots
-            .get(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version())
             .map(|slot| unsafe {
                 // This is safe because we only store valid indices.
                 let idx = slot.idx_or_free as usize;
@@ -515,7 +515,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked(&self, key: K) -> &V {
         debug_assert!(self.contains_key(key));
-        let idx = self.slots.get_unchecked(key.data().idx as usize).idx_or_free;
+        let idx = self.slots.get_unchecked(key.data().index() as usize).idx_or_free;
         &self.values.get_unchecked(idx as usize)
     }
 
@@ -535,8 +535,8 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
         let kd = key.data();
         self.slots
-            .get(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version())
             .map(|slot| slot.idx_or_free as usize)
             .map(move |idx| unsafe {
                 // This is safe because we only store valid indices.
@@ -565,7 +565,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, key: K) -> &mut V {
         debug_assert!(self.contains_key(key));
-        let idx = self.slots.get_unchecked(key.data().idx as usize).idx_or_free;
+        let idx = self.slots.get_unchecked(key.data().index() as usize).idx_or_free;
         self.values.get_unchecked_mut(idx as usize)
     }
 
@@ -610,7 +610,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
             // mark it as unoccupied so duplicate keys would show up as invalid.
             // This gives us a linear time disjointness check.
             unsafe {
-                let slot = self.slots.get_unchecked_mut(kd.idx as usize);
+                let slot = self.slots.get_unchecked_mut(kd.index() as usize);
                 slot.version ^= 1;
                 let ptr = self.values.get_unchecked_mut(slot.idx_or_free as usize);
                 ptrs[i] = MaybeUninit::new(ptr);
@@ -620,7 +620,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
 
         // Undo temporary unoccupied markings.
         for k in &keys[..i] {
-            let idx = k.data().idx as usize;
+            let idx = k.data().index() as usize;
             unsafe {
                 self.slots.get_unchecked_mut(idx).version ^= 1;
             }
@@ -929,7 +929,7 @@ impl<'a, K: Key, V> Iterator for Drain<'a, K, V> {
         let value = self.sm.values.pop();
 
         if let (Some(k), Some(v)) = (key, value) {
-            self.sm.free_slot(k.data().idx as usize);
+            self.sm.free_slot(k.data().index() as usize);
             Some((k, v))
         } else {
             None
@@ -1153,7 +1153,7 @@ mod serialize {
                 }
 
                 if let Some(value) = serde_slot.value {
-                    let kd = KeyData::new(i as u32, serde_slot.version);
+                    let kd = key_data(i as u32, serde_slot.version);
                     keys.push(kd.into());
                     values.push(value);
                     slots.push(Slot {

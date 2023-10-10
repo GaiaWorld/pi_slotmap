@@ -26,7 +26,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
 use crate::util::{Never, UnwrapUnchecked};
-use crate::{DefaultKey, Key, KeyData};
+use pi_key_alloter::{DefaultKey, Key, KeyData, key_data};
 
 // Metadata to maintain the freelist.
 #[derive(Clone, Copy, Debug)]
@@ -341,8 +341,8 @@ impl<K: Key, V> HopSlotMap<K, V> {
     pub fn contains_key(&self, key: K) -> bool {
         let kd = key.data();
         self.slots
-            .get(kd.idx as usize)
-            .map_or(false, |slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .map_or(false, |slot| slot.version == kd.version())
     }
 
     /// Inserts a value into the slot map. Returns a unique key that can be
@@ -443,7 +443,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
             // Freelist is empty.
             if slot_idx == 0 {
                 let version = 1;
-                let key = KeyData::new(self.slots.len() as u32, version).into();
+                let key = key_data(self.slots.len() as u32, version).into();
 
                 self.slots.push(Slot {
                     u: SlotUnion {
@@ -457,7 +457,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
 
             // Compute value first in case f panics or returns an error.
             let occupied_version = self.slots[slot_idx].version | 1;
-            let key = KeyData::new(slot_idx as u32, occupied_version).into();
+            let key = key_data(slot_idx as u32, occupied_version).into();
             let value = f(key)?;
 
             // Update freelist.
@@ -567,7 +567,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
         let kd = key.data();
         if self.contains_key(key) {
             // This is safe because we know that the slot is occupied.
-            Some(unsafe { self.remove_from_slot(kd.idx as usize) })
+            Some(unsafe { self.remove_from_slot(kd.index() as usize) })
         } else {
             None
         }
@@ -608,7 +608,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
             let idx = cur;
             let slot = unsafe { self.slots.get_unchecked_mut(cur) };
             let version = slot.version;
-            let key = KeyData::new(cur as u32, version).into();
+            let key = unsafe { key_data(cur as u32, version).into() };
             let should_remove = !f(key, unsafe { &mut *slot.u.value });
 
             cur = match self.slots.get(cur + 1).map(|s| s.get()) {
@@ -686,8 +686,8 @@ impl<K: Key, V> HopSlotMap<K, V> {
         // This is safe because we check version first and a key always contains
         // an odd version, thus we are occupied.
         self.slots
-            .get(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version())
             .map(|slot| unsafe { &*slot.u.value })
     }
 
@@ -711,7 +711,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked(&self, key: K) -> &V {
         debug_assert!(self.contains_key(key));
-        &self.slots.get_unchecked(key.data().idx as usize).u.value
+        &self.slots.get_unchecked(key.data().index() as usize).u.value
     }
 
     /// Returns a mutable reference to the value corresponding to the key.
@@ -732,8 +732,8 @@ impl<K: Key, V> HopSlotMap<K, V> {
         // This is safe because we check version first and a key always contains
         // an odd version, thus we are occupied.
         self.slots
-            .get_mut(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version)
+            .get_mut(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version())
             .map(|slot| unsafe { &mut *slot.u.value })
     }
 
@@ -758,7 +758,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, key: K) -> &mut V {
         debug_assert!(self.contains_key(key));
-        &mut self.slots.get_unchecked_mut(key.data().idx as usize).u.value
+        &mut self.slots.get_unchecked_mut(key.data().index() as usize).u.value
     }
 
     /// Returns mutable references to the values corresponding to the given
@@ -802,7 +802,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
             // mark it as unoccupied so duplicate keys would show up as invalid.
             // This gives us a linear time disjointness check.
             unsafe {
-                let slot = self.slots.get_unchecked_mut(kd.idx as usize);
+                let slot = self.slots.get_unchecked_mut(kd.index() as usize);
                 slot.version ^= 1;
                 ptrs[i] = MaybeUninit::new(&mut *slot.u.value);
             }
@@ -811,7 +811,7 @@ impl<K: Key, V> HopSlotMap<K, V> {
 
         // Undo temporary unoccupied markings.
         for k in &keys[..i] {
-            let idx = k.data().idx as usize;
+            let idx = k.data().index() as usize;
             unsafe {
                 self.slots.get_unchecked_mut(idx).version ^= 1;
             }
@@ -1137,7 +1137,7 @@ impl<'a, K: Key, V> Iterator for Drain<'a, K, V> {
             None => 0,
         };
 
-        let key = KeyData::new(idx as u32, unsafe { self.sm.slots.get_unchecked(idx).version });
+        let key = unsafe { key_data(idx as u32, unsafe { self.sm.slots.get_unchecked(idx).version }) };
         Some((key.into(), unsafe { self.sm.remove_from_slot(idx) }))
     }
 
@@ -1175,7 +1175,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
         self.cur = idx + 1;
         self.num_left -= 1;
         let slot = &mut self.slots[idx];
-        let key = KeyData::new(idx as u32, slot.version).into();
+        let key = unsafe { key_data(idx as u32, slot.version).into() };
         slot.version = 0; // Prevent dropping after extracting the value.
         Some((key, unsafe { ManuallyDrop::take(&mut slot.u.value) }))
     }
@@ -1203,7 +1203,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
 
         self.cur = idx + 1;
         let slot = unsafe { self.slots.get_unchecked(idx) };
-        let key = KeyData::new(idx as u32, slot.version).into();
+        let key = unsafe { key_data(idx as u32, slot.version).into() };
         Some((key, unsafe { &*slot.u.value }))
     }
 
@@ -1243,7 +1243,7 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
             let ptr: *mut V = &mut *slot.u.value;
             &mut *ptr
         };
-        Some((KeyData::new(idx as u32, version).into(), value_ref))
+        Some((unsafe { key_data(idx as u32, version).into() }, value_ref))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

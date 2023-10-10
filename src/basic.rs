@@ -14,7 +14,7 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
 use crate::util::{Never, UnwrapUnchecked};
-use crate::{DefaultKey, Key, KeyData};
+use pi_key_alloter::{DefaultKey, Key, KeyData, key_data};
 
 // Storage inside a slot or metadata for the freelist when vacant.
 union SlotUnion<T> {
@@ -322,8 +322,8 @@ impl<K: Key, V> SlotMap<K, V> {
     pub fn contains_key(&self, key: K) -> bool {
         let kd = key.data();
         self.slots
-            .get(kd.idx as usize)
-            .map_or(false, |slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .map_or(false, |slot| slot.version == kd.version())
     }
 
     /// Inserts a value into the slot map. Returns a unique key that can be used
@@ -405,7 +405,7 @@ impl<K: Key, V> SlotMap<K, V> {
 
         if let Some(slot) = self.slots.get_mut(self.free_head as usize) {
             let occupied_version = slot.version | 1;
-            let kd = KeyData::new(self.free_head, occupied_version);
+            let kd = unsafe {key_data(self.free_head, occupied_version)};
 
             // Get value first in case f panics or returns an error.
             let value = f(kd.into())?;
@@ -421,7 +421,7 @@ impl<K: Key, V> SlotMap<K, V> {
         }
 
         let version = 1;
-        let kd = KeyData::new(self.slots.len() as u32, version);
+        let kd = unsafe {key_data(self.slots.len() as u32, version)};
 
         // Create new slot before adjusting freelist in case f or the allocation panics or errors.
         self.slots.push(Slot {
@@ -431,7 +431,7 @@ impl<K: Key, V> SlotMap<K, V> {
             version,
         });
 
-        self.free_head = kd.idx + 1;
+        self.free_head = kd.index() + 1;
         self.num_elems = new_num_elems;
         Ok(kd.into())
     }
@@ -469,7 +469,7 @@ impl<K: Key, V> SlotMap<K, V> {
         let kd = key.data();
         if self.contains_key(key) {
             // This is safe because we know that the slot is occupied.
-            Some(unsafe { self.remove_from_slot(kd.idx as usize) })
+            Some(unsafe { self.remove_from_slot(kd.index() as usize) })
         } else {
             None
         }
@@ -511,7 +511,7 @@ impl<K: Key, V> SlotMap<K, V> {
             let version = slot.version;
 
             let should_remove = if let OccupiedMut(value) = slot.get_mut() {
-                let key = KeyData::new(i as u32, version).into();
+                let key = unsafe {key_data(i as u32, version)}.into();
                 !f(key, value)
             } else {
                 false
@@ -585,8 +585,8 @@ impl<K: Key, V> SlotMap<K, V> {
     pub fn get(&self, key: K) -> Option<&V> {
         let kd = key.data();
         self.slots
-            .get(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version)
+            .get(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version())
             .map(|slot| unsafe { &*slot.u.value })
     }
 
@@ -610,7 +610,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked(&self, key: K) -> &V {
         debug_assert!(self.contains_key(key));
-        &self.slots.get_unchecked(key.data().idx as usize).u.value
+        &self.slots.get_unchecked(key.data().index() as usize).u.value
     }
 
     /// Returns a mutable reference to the value corresponding to the key.
@@ -629,8 +629,8 @@ impl<K: Key, V> SlotMap<K, V> {
     pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
         let kd = key.data();
         self.slots
-            .get_mut(kd.idx as usize)
-            .filter(|slot| slot.version == kd.version)
+            .get_mut(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version())
             .map(|slot| unsafe { &mut *slot.u.value })
     }
 
@@ -655,7 +655,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// ```
     pub unsafe fn get_unchecked_mut(&mut self, key: K) -> &mut V {
         debug_assert!(self.contains_key(key));
-        &mut self.slots.get_unchecked_mut(key.data().idx as usize).u.value
+        &mut self.slots.get_unchecked_mut(key.data().index() as usize).u.value
     }
 
     /// Returns mutable references to the values corresponding to the given
@@ -697,7 +697,7 @@ impl<K: Key, V> SlotMap<K, V> {
             // mark it as unoccupied so duplicate keys would show up as invalid.
             // This gives us a linear time disjointness check.
             unsafe {
-                let slot = self.slots.get_unchecked_mut(kd.idx as usize);
+                let slot = self.slots.get_unchecked_mut(kd.index() as usize);
                 slot.version ^= 1;
                 ptrs[i] = MaybeUninit::new(&mut *slot.u.value);
             }
@@ -706,7 +706,7 @@ impl<K: Key, V> SlotMap<K, V> {
 
         // Undo temporary unoccupied markings.
         for k in &keys[..i] {
-            let idx = k.data().idx as usize;
+            let idx = k.data().index() as usize;
             unsafe {
                 self.slots.get_unchecked_mut(idx).version ^= 1;
             }
@@ -1042,7 +1042,7 @@ impl<'a, K: Key, V> Iterator for Drain<'a, K, V> {
             unsafe {
                 let slot = self.sm.slots.get_unchecked(idx);
                 if slot.occupied() {
-                    let kd = KeyData::new(idx as u32, slot.version);
+                    let kd = unsafe {key_data(idx as u32, slot.version)};
                     return Some((kd.into(), self.sm.remove_from_slot(idx)));
                 }
             }
@@ -1068,7 +1068,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
     fn next(&mut self) -> Option<(K, V)> {
         while let Some((idx, mut slot)) = self.slots.next() {
             if slot.occupied() {
-                let kd = KeyData::new(idx as u32, slot.version);
+                let kd = unsafe {key_data(idx as u32, slot.version)};
 
                 // Prevent dropping after extracting the value.
                 slot.version = 0;
@@ -1095,7 +1095,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     fn next(&mut self) -> Option<(K, &'a V)> {
         while let Some((idx, slot)) = self.slots.next() {
             if let Occupied(value) = slot.get() {
-                let kd = KeyData::new(idx as u32, slot.version);
+                let kd = unsafe {key_data(idx as u32, slot.version)};
                 self.num_left -= 1;
                 return Some((kd.into(), value));
             }
@@ -1116,7 +1116,7 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
         while let Some((idx, slot)) = self.slots.next() {
             let version = slot.version;
             if let OccupiedMut(value) = slot.get_mut() {
-                let kd = KeyData::new(idx as u32, version);
+                let kd = unsafe {key_data(idx as u32, version)};
                 self.num_left -= 1;
                 return Some((kd.into(), value));
             }
