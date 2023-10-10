@@ -1153,7 +1153,7 @@ mod serialize {
                 }
 
                 if let Some(value) = serde_slot.value {
-                    let kd = key_data(i as u32, serde_slot.version);
+                    let kd = unsafe { key_data(i as u32, serde_slot.version) };
                     keys.push(kd.into());
                     values.push(value);
                     slots.push(Slot {

@@ -28,7 +28,7 @@ struct Slot {
     version: u32,
 
     // An index when occupied, the next free slot otherwise.
-    idx: u32, // 表示非空索引或空索引
+    pub(crate) idx: u32, // 表示非空索引或空索引
 }
 
 /// Dense slot map, storage with stable unique keys.
@@ -1197,7 +1197,7 @@ mod serialize {
                 .iter()
                 .map(|slot| SerdeSlot {
                     value: if slot.version % 2 == 1 {
-                        self.values.get(slot.index() as usize)
+                        self.values.get(slot.idx as usize)
                     } else {
                         None
                     },

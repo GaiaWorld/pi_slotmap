@@ -224,7 +224,7 @@ pub mod sparse_secondary;
 pub(crate) mod util;
 
 
-pub use pi_key_alloter::{new_key_type, Key, DefaultKey, is_older_version};
+pub use pi_key_alloter::{new_key_type, Key, DefaultKey, KeyData, is_older_version};
 
 #[doc(inline)]
 pub use crate::basic::SlotMap;
@@ -257,51 +257,6 @@ impl<T> Slottable for T {}
 // pub trait Key = Key1;
 // #[doc(hidden)]
 // pub type DefaultKey = DefaultKey1;
-
-
-// Serialization with serde.
-#[cfg(feature = "serde")]
-mod serialize {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    use super::*;
-
-    #[derive(Serialize, Deserialize)]
-    pub struct SerKey {
-        idx: u32,
-        version: u32,
-    }
-
-    impl Serialize for KeyData {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let ser_key = SerKey {
-                idx: self.idx,
-                version: self.version,
-            };
-            ser_key.serialize(serializer)
-        }
-    }
-
-    impl<'de> Deserialize<'de> for KeyData {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            let mut ser_key: SerKey = Deserialize::deserialize(deserializer)?;
-
-            // Ensure a.is_null() && b.is_null() implies a == b.
-            if ser_key.idx == core::u32::MAX {
-                ser_key.version = 1;
-            }
-
-            ser_key.version |= 1; // Ensure version is odd.
-            Ok(Self::new(ser_key.idx, ser_key.version))
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -388,6 +343,6 @@ mod tests {
         // Even if a malicious entity sends up even (unoccupied) versions in the
         // key, we make the version point to the occupied version.
         let malicious: KeyData = serde_json::from_str(&r#"{"idx":0,"version":4}"#).unwrap();
-        assert_eq!(malicious.version, 5);
+        assert_eq!(malicious.version(), 5);
     }
 }
