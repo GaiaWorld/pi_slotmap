@@ -3,3 +3,4 @@
 .vscode
 Cargo.lock
 tags
+/.idea
