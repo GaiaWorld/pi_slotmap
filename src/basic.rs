@@ -567,7 +567,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// assert_eq!(v, vec![(k, 0)]);
     /// ```
     pub fn drain(&mut self) -> Drain<K, V> {
-        Drain { cur: 1, sm: self }
+        Drain { cur: 0, sm: self }
     }
 
     /// Returns a reference to the value corresponding to the key.
