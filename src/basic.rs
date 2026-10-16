@@ -3,7 +3,6 @@
 
 //! Contains the slot map implementation.
 
-#[cfg(all(nightly, any(doc, feature = "unstable")))]
 use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 use core::fmt;
@@ -13,8 +12,8 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
-use crate::util::{Never, UnwrapUnchecked};
-use pi_key_alloter::{DefaultKey, Key, key_data};
+use crate::util::{Never, PanicOnDrop, UnwrapNever};
+use crate::{checked_key, DefaultKey, Key};
 
 // Storage inside a slot or metadata for the freelist when vacant.
 union SlotUnion<T> {
@@ -101,12 +100,15 @@ impl<T: Clone> Clone for Slot<T> {
             (VacantMut(self_next_free), Vacant(&source_next_free)) => {
                 *self_next_free = source_next_free
             },
-            (_, Occupied(value)) => {
+            (OccupiedMut(_), Vacant(&next_free)) => unsafe {
+                ManuallyDrop::drop(&mut self.u.value);
+                self.u = SlotUnion { next_free };
+            },
+            (VacantMut(_), Occupied(value)) => {
                 self.u = SlotUnion {
                     value: ManuallyDrop::new(value.clone()),
                 }
             },
-            (_, Vacant(&next_free)) => self.u = SlotUnion { next_free },
         }
         self.version = source.version;
     }
@@ -140,7 +142,7 @@ impl<V> SlotMap<DefaultKey, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm: SlotMap<_, i32> = SlotMap::new();
     /// ```
     pub fn new() -> Self {
@@ -155,7 +157,7 @@ impl<V> SlotMap<DefaultKey, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm: SlotMap<_, i32> = SlotMap::with_capacity(10);
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
@@ -169,7 +171,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// new_key_type! {
     ///     struct PositionKey;
     /// }
@@ -188,7 +190,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// new_key_type! {
     ///     struct MessageKey;
     /// }
@@ -221,7 +223,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::with_capacity(10);
     /// sm.insert("len() counts actual elements, not capacity");
     /// let key = sm.insert("removed elements don't count either");
@@ -237,7 +239,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("dummy");
     /// assert_eq!(sm.is_empty(), false);
@@ -254,7 +256,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let sm: SlotMap<_, f64> = SlotMap::with_capacity(10);
     /// assert_eq!(sm.capacity(), 10);
     /// ```
@@ -274,7 +276,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// sm.insert("foo");
     /// sm.reserve(32);
@@ -293,14 +295,12 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// sm.insert("foo");
     /// sm.try_reserve(32).unwrap();
     /// assert!(sm.capacity() >= 33);
     /// ```
-    #[cfg(all(nightly, any(doc, feature = "unstable")))]
-    #[cfg_attr(all(nightly, doc), doc(cfg(feature = "unstable")))]
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         // One slot is reserved for the sentinel.
         let needed = (self.len() + additional).saturating_sub(self.slots.len() - 1);
@@ -312,7 +312,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert(42);
     /// assert_eq!(sm.contains_key(key), true);
@@ -323,7 +323,7 @@ impl<K: Key, V> SlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.index() as usize)
-            .map_or(false, |slot| slot.version == kd.version())
+            .map_or(false, |slot| slot.occupied() && slot.version == kd.version())
     }
 
     /// Inserts a value into the slot map. Returns a unique key that can be used
@@ -337,14 +337,14 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert(42);
     /// assert_eq!(sm[key], 42);
     /// ```
     #[inline(always)]
     pub fn insert(&mut self, value: V) -> K {
-        unsafe { self.try_insert_with_key::<_, Never>(move |_| Ok(value)).unwrap_unchecked_() }
+        self.try_insert_with_key::<_, Never>(move |_| Ok(value)).unwrap_never()
     }
 
     /// Inserts a value given by `f` into the slot map. The key where the
@@ -359,7 +359,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert_with_key(|k| (k, 20));
     /// assert_eq!(sm[key], (key, 20));
@@ -369,7 +369,7 @@ impl<K: Key, V> SlotMap<K, V> {
     where
         F: FnOnce(K) -> V,
     {
-        unsafe { self.try_insert_with_key::<_, Never>(move |k| Ok(f(k))).unwrap_unchecked_() }
+        self.try_insert_with_key::<_, Never>(move |k| Ok(f(k))).unwrap_never()
     }
 
     /// Inserts a value given by `f` into the slot map. The key where the
@@ -386,7 +386,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.try_insert_with_key::<_, ()>(|k| Ok((k, 20))).unwrap();
     /// assert_eq!(sm[key], (key, 20));
@@ -398,17 +398,12 @@ impl<K: Key, V> SlotMap<K, V> {
         F: FnOnce(K) -> Result<V, E>,
     {
         // In case f panics, we don't make any changes until we have the value.
-        let new_num_elems = self.num_elems + 1;
-        if new_num_elems == core::u32::MAX {
-            panic!("SlotMap number of elements overflow");
-        }
-
         if let Some(slot) = self.slots.get_mut(self.free_head as usize) {
             let occupied_version = slot.version | 1;
-            let kd = unsafe {key_data(self.free_head, occupied_version)};
+            let key = checked_key(self.free_head, occupied_version);
 
             // Get value first in case f panics or returns an error.
-            let value = f(kd.into())?;
+            let value = f(key)?;
 
             // Update.
             unsafe {
@@ -416,24 +411,29 @@ impl<K: Key, V> SlotMap<K, V> {
                 slot.u.value = ManuallyDrop::new(value);
                 slot.version = occupied_version;
             }
-            self.num_elems = new_num_elems;
-            return Ok(kd.into());
+            self.num_elems += 1;
+            return Ok(key);
+        }
+
+        if self.slots.len() >= u32::MAX as usize {
+            panic!("SlotMap is full");
         }
 
         let version = 1;
-        let kd = unsafe {key_data(self.slots.len() as u32, version)};
+        let index = self.slots.len() as u32;
+        let key = checked_key(index, version);
 
         // Create new slot before adjusting freelist in case f or the allocation panics or errors.
         self.slots.push(Slot {
             u: SlotUnion {
-                value: ManuallyDrop::new(f(kd.into())?),
+                value: ManuallyDrop::new(f(key)?),
             },
             version,
         });
 
-        self.free_head = kd.index() + 1;
-        self.num_elems = new_num_elems;
-        Ok(kd.into())
+        self.free_head = index + 1;
+        self.num_elems += 1;
+        Ok(key)
     }
 
     // Helper function to remove a value from a slot. Safe iff the slot is
@@ -459,7 +459,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert(42);
     /// assert_eq!(sm.remove(key), Some(42));
@@ -475,6 +475,35 @@ impl<K: Key, V> SlotMap<K, V> {
         }
     }
 
+    /// Temporarily removes a value without making its key reusable.
+    /// Detached keys are not preserved across serialization.
+    pub fn detach(&mut self, key: K) -> Option<V> {
+        if !self.contains_key(key) {
+            return None;
+        }
+        let slot = &mut self.slots[key.data().index() as usize];
+        let value = unsafe { ManuallyDrop::take(&mut slot.u.value) };
+        slot.u.next_free = u32::MAX;
+        slot.version = slot.version.wrapping_add(1);
+        self.num_elems -= 1;
+        Some(value)
+    }
+
+    /// Restores a previously detached key with a new value.
+    ///
+    /// # Panics
+    /// Panics if the key is not detached.
+    pub fn reattach(&mut self, key: K, value: V) {
+        let kd = key.data();
+        let slot = self.slots.get_mut(kd.index() as usize)
+            .filter(|slot| slot.version == kd.version().wrapping_add(1))
+            .filter(|slot| unsafe { slot.u.next_free == u32::MAX })
+            .expect("key is not detached");
+        slot.u.value = ManuallyDrop::new(value);
+        slot.version = slot.version.wrapping_sub(1);
+        self.num_elems += 1;
+    }
+
     /// Retains only the elements specified by the predicate.
     ///
     /// In other words, remove all key-value pairs `(k, v)` such that
@@ -486,7 +515,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     ///
     /// let k1 = sm.insert(0);
@@ -511,7 +540,7 @@ impl<K: Key, V> SlotMap<K, V> {
             let version = slot.version;
 
             let should_remove = if let OccupiedMut(value) = slot.get_mut() {
-                let key = unsafe {key_data(i as u32, version)}.into();
+                let key = checked_key(i as u32, version);
                 !f(key, value)
             } else {
                 false
@@ -532,7 +561,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// for i in 0..10 {
     ///     sm.insert(i);
@@ -559,7 +588,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let k = sm.insert(0);
     /// let v: Vec<_> = sm.drain().collect();
@@ -567,7 +596,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// assert_eq!(v, vec![(k, 0)]);
     /// ```
     pub fn drain(&mut self) -> Drain<K, V> {
-        Drain { cur: 0, sm: self }
+        Drain { cur: 1, sm: self }
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -575,7 +604,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("bar");
     /// assert_eq!(sm.get(key), Some(&"bar"));
@@ -586,7 +615,7 @@ impl<K: Key, V> SlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.index() as usize)
-            .filter(|slot| slot.version == kd.version())
+            .filter(|slot| slot.occupied() && slot.version == kd.version())
             .map(|slot| unsafe { &*slot.u.value })
     }
 
@@ -601,7 +630,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("bar");
     /// assert_eq!(unsafe { sm.get_unchecked(key) }, &"bar");
@@ -618,7 +647,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert(3.5);
     /// if let Some(x) = sm.get_mut(key) {
@@ -630,7 +659,7 @@ impl<K: Key, V> SlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get_mut(kd.index() as usize)
-            .filter(|slot| slot.version == kd.version())
+            .filter(|slot| slot.occupied() && slot.version == kd.version())
             .map(|slot| unsafe { &mut *slot.u.value })
     }
 
@@ -645,7 +674,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("foo");
     /// unsafe { *sm.get_unchecked_mut(key) = "bar" };
@@ -666,7 +695,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let ka = sm.insert("butter");
     /// let kb = sm.insert("apples");
@@ -681,43 +710,18 @@ impl<K: Key, V> SlotMap<K, V> {
     /// ```
     #[cfg(has_min_const_generics)]
     pub fn get_disjoint_mut<const N: usize>(&mut self, keys: [K; N]) -> Option<[&mut V; N]> {
-        // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
-        // safe because the type we are claiming to have initialized here is a
-        // bunch of `MaybeUninit`s, which do not require initialization.
-        let mut ptrs: [MaybeUninit<*mut V>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-
-        let mut i = 0;
-        while i < N {
-            let kd = keys[i].data();
-            if !self.contains_key(kd.into()) {
-                break;
-            }
-
-            // This key is valid, and thus the slot is occupied. Temporarily
-            // mark it as unoccupied so duplicate keys would show up as invalid.
-            // This gives us a linear time disjointness check.
-            unsafe {
-                let slot = self.slots.get_unchecked_mut(kd.index() as usize);
-                slot.version ^= 1;
-                ptrs[i] = MaybeUninit::new(&mut *slot.u.value);
-            }
-            i += 1;
-        }
-
-        // Undo temporary unoccupied markings.
-        for k in &keys[..i] {
-            let idx = k.data().index() as usize;
-            unsafe {
-                self.slots.get_unchecked_mut(idx).version ^= 1;
+        let data = keys.map(|key| key.data());
+        for (i, kd) in data.iter().enumerate() {
+            let slot = self.slots.get(kd.index() as usize)?;
+            if !slot.occupied() || slot.version != kd.version()
+                || data[..i].iter().any(|prior| prior.index() == kd.index())
+            {
+                return None;
             }
         }
-
-        if i == N {
-            // All were valid and disjoint.
-            Some(unsafe { core::mem::transmute_copy::<_, [&mut V; N]>(&ptrs) })
-        } else {
-            None
-        }
+        // Validate all indices before forming any mutable references.
+        let slots = self.slots.as_mut_ptr();
+        Some(data.map(|kd| unsafe { &mut *(*slots.add(kd.index() as usize)).u.value }))
     }
 
     /// Returns mutable references to the values corresponding to the given
@@ -733,7 +737,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let ka = sm.insert("butter");
     /// let kb = sm.insert("apples");
@@ -764,7 +768,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let k0 = sm.insert(0);
     /// let k1 = sm.insert(1);
@@ -794,7 +798,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let k0 = sm.insert(10);
     /// let k1 = sm.insert(20);
@@ -830,7 +834,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = SlotMap::new();
     /// let k0 = sm.insert(10);
@@ -853,7 +857,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = SlotMap::new();
     /// let k0 = sm.insert(10);
@@ -876,7 +880,7 @@ impl<K: Key, V> SlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = SlotMap::new();
     /// sm.insert(1);
@@ -906,9 +910,11 @@ where
     }
 
     fn clone_from(&mut self, source: &Self) {
+        let guard = PanicOnDrop("abort - a panic during SlotMap::clone_from is unrecoverable");
         self.slots.clone_from(&source.slots);
         self.free_head = source.free_head;
         self.num_elems = source.num_elems;
+        core::mem::forget(guard);
     }
 }
 
@@ -1042,8 +1048,8 @@ impl<'a, K: Key, V> Iterator for Drain<'a, K, V> {
             unsafe {
                 let slot = self.sm.slots.get_unchecked(idx);
                 if slot.occupied() {
-                    let kd = unsafe {key_data(idx as u32, slot.version)};
-                    return Some((kd.into(), self.sm.remove_from_slot(idx)));
+                    let key = checked_key(idx as u32, slot.version);
+                    return Some((key, self.sm.remove_from_slot(idx)));
                 }
             }
         }
@@ -1068,7 +1074,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
     fn next(&mut self) -> Option<(K, V)> {
         while let Some((idx, mut slot)) = self.slots.next() {
             if slot.occupied() {
-                let kd = unsafe {key_data(idx as u32, slot.version)};
+                let key = checked_key(idx as u32, slot.version);
 
                 // Prevent dropping after extracting the value.
                 slot.version = 0;
@@ -1077,7 +1083,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
                 let value = unsafe { ManuallyDrop::take(&mut slot.u.value) };
 
                 self.num_left -= 1;
-                return Some((kd.into(), value));
+                return Some((key, value));
             }
         }
 
@@ -1095,9 +1101,9 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
     fn next(&mut self) -> Option<(K, &'a V)> {
         while let Some((idx, slot)) = self.slots.next() {
             if let Occupied(value) = slot.get() {
-                let kd = unsafe {key_data(idx as u32, slot.version)};
+                let key = checked_key(idx as u32, slot.version);
                 self.num_left -= 1;
-                return Some((kd.into(), value));
+                return Some((key, value));
             }
         }
 
@@ -1116,9 +1122,9 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
         while let Some((idx, slot)) = self.slots.next() {
             let version = slot.version;
             if let OccupiedMut(value) = slot.get_mut() {
-                let kd = unsafe {key_data(idx as u32, version)};
+                let key = checked_key(idx as u32, version);
                 self.num_left -= 1;
-                return Some((kd.into(), value));
+                return Some((key, value));
             }
         }
 
@@ -1499,21 +1505,22 @@ mod tests {
     #[test]
     fn slotmap_serde() {
         let mut sm = SlotMap::new();
-        // Self-referential structure.
-        let first = sm.insert_with_key(|k| (k, 23i32));
-        let second = sm.insert((first, 42));
+        let first = sm.insert(23i32);
+        let second = sm.insert(42);
 
         // Make some empty slots.
-        let empties = vec![sm.insert((first, 0)), sm.insert((first, 0))];
+        let empties = vec![sm.insert(0), sm.insert(0)];
         empties.iter().for_each(|k| {
             sm.remove(*k);
         });
 
-        let third = sm.insert((second, 0));
-        sm[first].0 = third;
+        let third = sm.insert(7);
+        assert_eq!(sm[first], 23);
+        assert_eq!(sm[second], 42);
+        assert_eq!(sm[third], 7);
 
         let ser = serde_json::to_string(&sm).unwrap();
-        let de: SlotMap<DefaultKey, (DefaultKey, i32)> = serde_json::from_str(&ser).unwrap();
+        let de: SlotMap<DefaultKey, i32> = serde_json::from_str(&ser).unwrap();
         assert_eq!(de.len(), sm.len());
 
         let mut smkv: Vec<_> = sm.iter().collect();

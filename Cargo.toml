@@ -1,6 +1,6 @@
 [package]
 name = "pi_slotmap"
-version = "0.2.1"
+version = "0.3.1"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "Slotmap data structure"
@@ -14,14 +14,14 @@ categories = ["data-structures", "memory-management", "caching"]
 default = ["std"]
 unstable = []
 std = []
-serde = ["pi_key_alloter/serde"]
+serde = ["pi_key/serde"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-pi_null = "0.1"
-pi_key_alloter = "0.6"
+pi_key = "0.3.0"
 
 [dev-dependencies]
+pi_null = "0.2"
 fxhash = "0.2.1"
 serde = "1.0"
 serde_derive = "1.0"

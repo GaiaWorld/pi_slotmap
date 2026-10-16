@@ -2,8 +2,7 @@
 // https://en.wikipedia.org/wiki/Randomized_meldable_heap
 
 use pi_null::Null;
-use pi_key_alloter::new_key_type;
-use pi_slotmap::SlotMap;
+use pi_slotmap::{new_key_type, SlotMap};
 
 new_key_type! {
     struct HeapKey;

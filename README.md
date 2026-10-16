@@ -1,4 +1,6 @@
-该库slotmap的一份拷贝，另外添加了一些新的功能
+This crate is a fork of slotmap with additional features. Keys are provided by
+pi_key with full 32-bit versions. Enable the serde feature to serialize maps
+and keys stored in their values.
 
 # slotmap
 
@@ -12,12 +14,11 @@ ownership otherwise, such as game entities or graph nodes. Two secondary maps,
 further objects to the keys created by one of the slot maps. Please refer to the
 [**the documentation**](https://docs.rs/slotmap) for more information.
 
-The minimum required stable Rust version for `slotmap` is 1.49. To start using
-`slotmap` add the following to your `Cargo.toml`:
+To start using `pi_slotmap`, add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-slotmap = "1.0"
+pi_slotmap = "0.2"
 ```
 
 # Example
@@ -25,7 +26,7 @@ slotmap = "1.0"
 A short example:
 
 ```rust
-use slotmap::{SlotMap, SecondaryMap};
+use pi_slotmap::{SlotMap, SecondaryMap};
 
 let mut sm = SlotMap::new();
 let foo = sm.insert("foo");  // Key generated on insert.
