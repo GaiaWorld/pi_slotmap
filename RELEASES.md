@@ -1,3 +1,20 @@
+Version 0.5.0 (pi_slotmap)
+=========================
+
+ - Upgraded pi_key to 0.4.
+
+ - Added SlotMap::compact() to rebuild the free list in ascending index order
+   while preserving all slots, versions, and allocated capacity.
+ - Added SlotMap::shrink_to_fit() for capacity-only shrinking, and
+   shrink_to_last_occupied() to discard trailing vacant slots and shrink capacity.
+   Trimming loses their versions and reserved bits; callers must handle stale
+   keys and secondary-map associations that may become valid again on reuse.
+ - Added SlotMap<K, V, const N: u32 = 0> with N caller-controlled low version
+   bits and occupation at bit N. Removal and reuse each advance by 1 << N.
+   Added set_key_bits() returning the updated strict key and get_key_bits()
+   reading occupied-slot bits by index. Lookups compare the entire version.
+   Use matching N when deserializing; larger N reduces the generation period.
+
 Version 1.0.6
 =============
 

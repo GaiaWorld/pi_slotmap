@@ -51,7 +51,7 @@
 //! stored in slot maps, without hashing required - it's direct indexing under
 //! the hood.
 //!
-//! The minimum required stable Rust version for this crate is 1.49.
+//! The constant-generic `SlotMap` API requires Rust 1.51 or later.
 //!
 //! # Examples
 //!
@@ -82,7 +82,7 @@
 //! feature is enabled; this also enables serialization for keys from `pi_key`.
 //!
 //! ```text
-//! pi_slotmap = { version = "0.2", features = ["serde"] }
+//! pi_slotmap = { version = "0.5", features = ["serde"] }
 //! ```
 //!
 //! This crate also supports [`no_std`] environments, but does require the
@@ -90,7 +90,7 @@
 //! `std` feature that is enabled by default:
 //!
 //! ```text
-//! pi_slotmap = { version = "0.2", default-features = false }
+//! pi_slotmap = { version = "0.5", default-features = false }
 //! ```
 //!
 //! [`SparseSecondaryMap`] and [`DelaySlotMap`] require `std`. The
@@ -111,15 +111,16 @@
 //!
 //! Insertion, access and deletion is all O(1) with low overhead by storing the
 //! elements inside a [`Vec`]. Unlike references or indices into a vector,
-//! unless you remove a key it is never invalidated. Behind the scenes each
+//! keys remain valid until removal or an explicit change to their reserved bits. Behind the scenes each
 //! slot in the vector is a `(value, version)` tuple. After insertion the
 //! returned key also contains a version. Only when the stored version and
 //! version in a key match is a key valid. This allows us to reuse space in the
 //! vector after deletion without letting removed keys point to spurious new
-//! elements. <sup>*</sup>After 2<sup>31</sup> deletions and insertions to the
-//! same underlying slot the version wraps around and such a spurious reference
-//! could potentially occur. It is incredibly unlikely however, and in all
-//! circumstances is the behavior safe. A slot map can hold up to
+//! elements. <sup>*</sup>For the default `SlotMap<K, V, 0>`, versions repeat after
+//! 2<sup>31</sup> removal/reuse cycles of one slot. With `N` reserved bits and
+//! unchanged low bits, the period is 2<sup>31-N</sup> cycles. Trimming trailing
+//! slots with `shrink_to_last_occupied` also discards version history and may
+//! recreate removed keys on subsequent insertion. A slot map can hold up to
 //! 2<sup>32</sup> - 2 elements at a time.
 //!
 //! The memory usage for each slot in [`SlotMap`] is `4 + max(sizeof(T), 4)`
@@ -129,11 +130,13 @@
 //!
 //! # Choosing [`SlotMap`], [`HopSlotMap`] or [`DenseSlotMap`]
 //!
-//! A [`SlotMap`] is the fastest for most operations, except iteration. It can
-//! never shrink the size of its underlying storage, because it must remember
-//! for each storage slot what the latest stored version was, even if the slot
-//! is empty now. This means that iteration can be slow as it must iterate over
-//! potentially a lot of empty slots.
+//! A [`SlotMap`] is the fastest for most operations, except iteration. It
+//! normally keeps vacant slots to preserve their versions, so iteration may
+//! scan many empty slots. `compact()` rebuilds the free list in ascending index
+//! order without moving values or dropping versions. `shrink_to_fit()` releases
+//! only unused vector capacity. `shrink_to_last_occupied()` additionally removes
+//! trailing vacant slots; the caller must handle the lost version history,
+//! reserved bits, stale keys, and secondary-map associations.
 //!
 //! [`HopSlotMap`] solves this by maintaining more information on
 //! insertion/removal, allowing it to iterate only over filled slots by 'hopping
@@ -148,6 +151,22 @@
 //! contain indices used to access the contiguous memory. This means random
 //! access is slower than both [`SlotMap`] and [`HopSlotMap`], but iteration is
 //! significantly faster, as fast as a normal [`Vec`].
+//!
+//! # Reserved version bits in [`SlotMap`]
+//!
+//! `SlotMap<K, V, const N: u32 = 0>` reserves the low `N` version bits for the
+//! caller. Bit `N` is the occupation bit. Removal and reuse each add `1 << N`
+//! with wrapping arithmetic, preserving the low bits. `N` must be below 32.
+//! Use `SlotMap::<DefaultKey, Value, N>::with_key()` for a nonzero `N`.
+//!
+//! `set_key_bits(key, bits)` returns the updated key; changing bits makes the
+//! old key fail strict lookups. Update any copies and secondary-map entries.
+//! `get_key_bits(index)` reads occupied-slot bits without validating generation;
+//! reconstructing a key must retain its original high generation bits. Changing
+//! bits back can make an earlier key from the same generation match again.
+//! Serialization keeps full versions but not `N`; deserialize with the same `N`.
+//! These options apply to ordinary `SlotMap`, not `HopSlotMap`, `DenseSlotMap`,
+//! or `DelaySlotMap`.
 //!
 //! # Choosing [`SecondaryMap`] or [`SparseSecondaryMap`]
 //!

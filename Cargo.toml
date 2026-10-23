@@ -1,6 +1,6 @@
 [package]
 name = "pi_slotmap"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "Slotmap data structure"
@@ -18,7 +18,7 @@ serde = ["pi_key/serde"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-pi_key = "0.3.0"
+pi_key = "0.4"
 
 [dev-dependencies]
 pi_null = "0.2"
