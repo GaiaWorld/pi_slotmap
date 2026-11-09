@@ -1,3 +1,38 @@
+待发布版本（unpublished version）0.6.0 (pi_slotmap)
+================================================
+
+ - 同步主分支（master）的 `0.5.1` 修复，拒绝向仍占用的位置重新附接（reattach）。
+ - 将开发依赖（dev dependency）`quickcheck` 升至 `1.1` 系列，保留原测试断言（test assertion）。
+ - 按标准库特性（std feature）控制相关测试（test），保持其余容器（container）的验证入口。
+ - 排除包（package）中的本地规则和开发资料，并统一文本换行符（LF）。
+ - 本地版本（local version）按用户要求准备为 `0.6.0`，尚未发布（unpublished）。
+
+Version 0.5.1 (pi_slotmap)
+=========================
+
+ - Fixed SlotMap::reattach accepting certain invalid keys for occupied slots.
+   It now checks the occupation bit before reading the detached marker,
+   preventing existing values from being overwritten and len() from increasing.
+ - Added regression coverage for invalid keys, repeated reattachment, and
+   normal detach/reattach with 0, 2, and 31 reserved version bits.
+
+Version 0.5.0 (pi_slotmap)
+=========================
+
+ - Upgraded pi_key to 0.4.
+
+ - Added SlotMap::compact() to rebuild the free list in ascending index order
+   while preserving all slots, versions, and allocated capacity.
+ - Added SlotMap::shrink_to_fit() for capacity-only shrinking, and
+   shrink_to_last_occupied() to discard trailing vacant slots and shrink capacity.
+   Trimming loses their versions and reserved bits; callers must handle stale
+   keys and secondary-map associations that may become valid again on reuse.
+ - Added SlotMap<K, V, const N: u32 = 0> with N caller-controlled low version
+   bits and occupation at bit N. Removal and reuse each advance by 1 << N.
+   Added set_key_bits() returning the updated strict key and get_key_bits()
+   reading occupied-slot bits by index. Lookups compare the entire version.
+   Use matching N when deserializing; larger N reduces the generation period.
+
 Version 1.0.6
 =============
 

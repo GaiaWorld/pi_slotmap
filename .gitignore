@@ -4,3 +4,10 @@
 Cargo.lock
 tags
 /.idea
+/Cargo.lock
+/*.log
+/.codex
+/docs
+AGENTS.md
+agent-skills
+/.agent_guide/

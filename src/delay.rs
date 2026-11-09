@@ -7,7 +7,6 @@
 // might have come from a different slot map or malicious serde deseralization).
 
 use std::convert::TryFrom;
-#[cfg(all(nightly, any(doc, feature = "unstable")))]
 use alloc::collections::TryReserveError;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -17,8 +16,8 @@ use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 use std::sync::atomic::{Ordering, AtomicU32};
 
-use crate::util::{Never, UnwrapUnchecked};
-use pi_key_alloter::{DefaultKey, Key, key_data};
+use crate::util::{Never, PanicOnDrop, UnwrapNever};
+use crate::{checked_key, DefaultKey, Key};
 
 // A slot, which represents storage for an index and a current version.
 // Can be occupied or vacant.
@@ -51,7 +50,7 @@ impl<V> DelaySlotMap<DefaultKey, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm: DenseSlotMap<_, i32> = DenseSlotMap::new();
     /// ```
     pub fn new() -> Self {
@@ -66,7 +65,7 @@ impl<V> DelaySlotMap<DefaultKey, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm: DenseSlotMap<_, i32> = DenseSlotMap::with_capacity(10);
     /// ```
     pub fn with_capacity(capacity: usize) -> DelaySlotMap<DefaultKey, V> {
@@ -80,7 +79,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// new_key_type! {
     ///     struct PositionKey;
     /// }
@@ -99,7 +98,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// new_key_type! {
     ///     struct MessageKey;
     /// }
@@ -134,18 +133,22 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     ///
     /// Equivalent to `self.reserve_entities(1).next().unwrap()`, but more efficient.
     pub fn reserve_entity(&self) -> K {
-        let n = self.alloc_count.fetch_add(1, Ordering::Relaxed);
-        if n < self.free_vec.len() as u32 {
-            // Allocate from the freelist.
-            let id = self.free_vec[n as usize];
-            K::from(unsafe {key_data(id, self.slots[id as usize].version | 1)})
-        } else {
-            // Grab a new ID, outside the range of `meta.len()`. `flush()` must
-            // eventually be called to make it valid.
-            //
-            // As `self.alloc_count` goes more and more negative, we return IDs farther
-            // and farther beyond `meta.len()`.
-			K::from(unsafe {key_data(u32::try_from(self.slots.len() + (n as usize - self.free_vec.len())).expect("too many entities"), 1)})
+        loop {
+            let n = self.alloc_count.load(Ordering::Relaxed);
+            let key = if (n as usize) < self.free_vec.len() {
+                let id = self.free_vec[n as usize];
+                checked_key(id, self.slots[id as usize].version | 1)
+            } else {
+                let index = self.slots.len().checked_add(n as usize - self.free_vec.len())
+                    .and_then(|index| u32::try_from(index).ok())
+                    .filter(|&index| index < u32::MAX)
+                    .expect("too many entities");
+                checked_key(index, 1)
+            };
+            let next = n.checked_add(1).expect("too many entities");
+            if self.alloc_count.compare_exchange_weak(n, next, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                return key;
+            }
         }
     }
 
@@ -169,8 +172,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// each time init is called. This _can_ be [`ArchetypeId::INVALID`], provided the [`Entity`]
     /// has not been assigned to an [`Archetype`][crate::archetype::Archetype].
     pub unsafe fn flush(&mut self, mut init: impl FnMut(&mut Self, K)) {
-        let alloc_count = self.alloc_count.get_mut();
-        let current_alloc_count = *alloc_count as usize;
+        let current_alloc_count = *self.alloc_count.get_mut() as usize;
 
 		let count1; // 当前释放的空位的数量
 		let count2; // 除空位以外，还需额外的分配数量
@@ -182,19 +184,25 @@ impl<K: Key, V> DelaySlotMap<K, V> {
 			count2 = 0;
 		}
 
-		for _i in 0..count1 {
-			let index = self.free_vec[0];
-			init(self, K::from(unsafe {key_data(index, self.slots[index as usize].version | 1)}));
-		}
+        // Validate every key before any callback can initialize a value.
+        let mut keys = Vec::with_capacity(current_alloc_count);
+        for &index in self.free_vec.iter().take(count1) {
+            keys.push(checked_key(index, self.slots[index as usize].version | 1));
+        }
+        for i in 0..count2 {
+            let index = self.slots.len().checked_add(i)
+                .and_then(|index| u32::try_from(index).ok())
+                .filter(|&index| index < u32::MAX)
+                .expect("too many entities");
+            keys.push(checked_key(index, 1));
+        }
 
-		let len = self.slots.len();
-		for i in 0..count2 {
-			let index = len + i;
-			init(self, K::from(unsafe {key_data(index as u32, 1)}));
-		}
+        self.alloc_count.store(0, Ordering::Relaxed);
+        for key in keys {
+            init(self, key);
+        }
 		// let new_len = self.free_vec.len() - count1;
         // self.free_vec.set_len(new_len);
-		self.alloc_count.swap(0, Ordering::Relaxed);
     }
 
 
@@ -203,7 +211,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::with_capacity(10);
     /// sm.insert("len() counts actual elements, not capacity");
     /// let key = sm.insert("removed elements don't count either");
@@ -219,7 +227,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert("dummy");
     /// assert_eq!(sm.is_empty(), false);
@@ -236,7 +244,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let sm: DenseSlotMap<_, f64> = DenseSlotMap::with_capacity(10);
     /// assert_eq!(sm.capacity(), 10);
     /// ```
@@ -255,7 +263,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// sm.insert("foo");
     /// sm.reserve(32);
@@ -276,14 +284,12 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// sm.insert("foo");
     /// sm.try_reserve(32).unwrap();
     /// assert!(sm.capacity() >= 33);
     /// ```
-    #[cfg(all(nightly, any(doc, feature = "unstable")))]
-    #[cfg_attr(all(nightly, doc), doc(cfg(feature = "unstable")))]
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         self.keys.try_reserve(additional)?;
         self.values.try_reserve(additional)?;
@@ -297,7 +303,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert(42);
     /// assert_eq!(sm.contains_key(key), true);
@@ -308,7 +314,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.index() as usize)
-            .map_or(false, |slot| slot.version == kd.version())
+            .map_or(false, |slot| slot.version % 2 == 1 && slot.version == kd.version())
     }
 
     /// Inserts a value into the slot map. Returns a unique key that can be used
@@ -322,7 +328,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert(42);
     /// assert_eq!(sm[key], 42);
@@ -330,7 +336,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     // #[inline(always)]
     pub fn insert(&mut self, value: V) -> K {
 		self.verify_flushed();
-        unsafe { self.try_insert_with_key::<_, Never>(move |_| Ok(value)).unwrap_unchecked_() }
+        self.try_insert_with_key::<_, Never>(move |_| Ok(value)).unwrap_never()
     }
 
     /// Inserts a value given by `f` into the slot map. The key where the
@@ -345,7 +351,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert_with_key(|k| (k, 20));
     /// assert_eq!(sm[key], (key, 20));
@@ -355,7 +361,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     where
         F: FnOnce(K) -> V,
     {
-        unsafe { self.try_insert_with_key::<_, Never>(move |k| Ok(f(k))).unwrap_unchecked_() }
+        self.try_insert_with_key::<_, Never>(move |k| Ok(f(k))).unwrap_never()
     }
 
     /// Inserts a value given by `f` into the slot map. The key where the
@@ -372,7 +378,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.try_insert_with_key::<_, ()>(|k| Ok((k, 20))).unwrap();
     /// assert_eq!(sm[key], (key, 20));
@@ -383,22 +389,18 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     where
         F: FnOnce(K) -> Result<V, E>,
     {
-        if self.len() >= (core::u32::MAX - 1) as usize {
-            panic!("DenseSlotMap number of elements overflow");
-        }
-
-		
-		let idx = self.free_vec.pop_front();
+        let idx = self.free_vec.front().copied();
 //         let idx = self.free_head;
 // idx
 		if let Some(idx) = idx {
 			let slot = unsafe{self.slots.get_unchecked_mut(idx as usize)};
 			let occupied_version = slot.version | 1;
-            let key = unsafe {key_data(idx, occupied_version)}.into();
+            let key = checked_key(idx, occupied_version);
 
             // Push value before adjusting slots/freelist in case f panics or returns an error.
             self.values.push(f(key)?);
             self.keys.push(key);
+            self.free_vec.pop_front();
             // self.free_head = slot.index()_or_free;
             // slot.index()_or_free = self.keys.len() as u32 - 1;
             slot.version = occupied_version;
@@ -408,7 +410,10 @@ impl<K: Key, V> DelaySlotMap<K, V> {
 		}
 
         // Push value before adjusting slots/freelist in case f panics or returns an error.
-        let key = unsafe {key_data(self.slots.len() as u32, 1)}.into();
+        if self.slots.len() >= u32::MAX as usize {
+            panic!("DelaySlotMap is full");
+        }
+        let key = checked_key(self.slots.len() as u32, 1);
         self.values.push(f(key)?);
         self.keys.push(key);
         self.slots.push(Slot {
@@ -456,7 +461,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert(42);
     /// assert_eq!(sm.remove(key), Some(42));
@@ -480,7 +485,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     ///
     /// let k3 = sm.insert(2);
@@ -521,7 +526,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// for i in 0..10 {
     ///     sm.insert(i);
@@ -545,7 +550,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let k = sm.insert(0);
     /// let v: Vec<_> = sm.drain().collect();
@@ -561,7 +566,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert("bar");
     /// assert_eq!(sm.get(key), Some(&"bar"));
@@ -572,7 +577,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.index() as usize)
-            .filter(|slot| slot.version == kd.version())
+            .filter(|slot| slot.version % 2 == 1 && slot.version == kd.version())
             .map(|slot| unsafe {
                 // This is safe because we only store valid indices.
                 let idx = slot.idx as usize;
@@ -591,7 +596,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert("bar");
     /// assert_eq!(unsafe { sm.get_unchecked(key) }, &"bar");
@@ -609,7 +614,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert(3.5);
     /// if let Some(x) = sm.get_mut(key) {
@@ -621,7 +626,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.index() as usize)
-            .filter(|slot| slot.version == kd.version())
+            .filter(|slot| slot.version % 2 == 1 && slot.version == kd.version())
             .map(|slot| slot.idx as usize)
             .map(move |idx| unsafe {
                 // This is safe because we only store valid indices.
@@ -640,7 +645,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let key = sm.insert("foo");
     /// unsafe { *sm.get_unchecked_mut(key) = "bar" };
@@ -663,7 +668,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let ka = sm.insert("butter");
     /// let kb = sm.insert("apples");
@@ -678,45 +683,19 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// ```
     #[cfg(has_min_const_generics)]
     pub fn get_disjoint_mut<const N: usize>(&mut self, keys: [K; N]) -> Option<[&mut V; N]> {
-        // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
-        // safe because the type we are claiming to have initialized here is a
-        // bunch of `MaybeUninit`s, which do not require initialization.
-        let mut ptrs: [MaybeUninit<*mut V>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-
-        let mut i = 0;
-        while i < N {
-            // We can avoid this clone after min_const_generics and array_map.
-            let kd = keys[i].data();
-            if !self.contains_key(kd.into()) {
-                break;
-            }
-
-            // This key is valid, and thus the slot is occupied. Temporarily
-            // mark it as unoccupied so duplicate keys would show up as invalid.
-            // This gives us a linear time disjointness check.
-            unsafe {
-                let slot = self.slots.get_unchecked_mut(kd.index() as usize);
-                slot.version ^= 1;
-                let ptr = self.values.get_unchecked_mut(slot.idx as usize);
-                ptrs[i] = MaybeUninit::new(ptr);
-            }
-            i += 1;
-        }
-
-        // Undo temporary unoccupied markings.
-        for k in &keys[..i] {
-            let idx = k.data().index() as usize;
-            unsafe {
-                self.slots.get_unchecked_mut(idx).version ^= 1;
+        let data = keys.map(|key| key.data());
+        for (i, kd) in data.iter().enumerate() {
+            let slot = self.slots.get(kd.index() as usize)?;
+            if slot.version % 2 != 1 || slot.version != kd.version()
+                || slot.idx as usize >= self.values.len()
+                || data[..i].iter().any(|prior| prior.index() == kd.index())
+            {
+                return None;
             }
         }
-
-        if i == N {
-            // All were valid and disjoint.
-            Some(unsafe { core::mem::transmute_copy::<_, [&mut V; N]>(&ptrs) })
-        } else {
-            None
-        }
+        let values = self.values.as_mut_ptr();
+        // Distinct occupied slots own distinct dense value indices.
+        Some(data.map(|kd| unsafe { &mut *values.add(self.slots[kd.index() as usize].idx as usize) }))
     }
 
     /// Returns mutable references to the values corresponding to the given
@@ -732,7 +711,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let ka = sm.insert("butter");
     /// let kb = sm.insert("apples");
@@ -760,7 +739,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let k0 = sm.insert(0);
     /// let k1 = sm.insert(1);
@@ -785,7 +764,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = DenseSlotMap::new();
     /// let k0 = sm.insert(10);
     /// let k1 = sm.insert(20);
@@ -814,7 +793,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = DenseSlotMap::new();
     /// let k0 = sm.insert(10);
@@ -834,7 +813,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = DenseSlotMap::new();
     /// let k0 = sm.insert(10);
@@ -854,7 +833,7 @@ impl<K: Key, V> DelaySlotMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = DenseSlotMap::new();
     /// sm.insert(1);
@@ -888,10 +867,14 @@ where
     }
 
     fn clone_from(&mut self, source: &Self) {
-        self.keys.clone_from(&source.keys);
+        let guard = PanicOnDrop("abort - a panic during DelaySlotMap::clone_from is unrecoverable");
         self.values.clone_from(&source.values);
+        self.keys.clone_from(&source.keys);
         self.slots.clone_from(&source.slots);
+        self.free_vec.clone_from(&source.free_vec);
+        *self.alloc_count.get_mut() = source.alloc_count.load(Ordering::Relaxed);
         self.free_head = source.free_head;
+        core::mem::forget(guard);
     }
 }
 
@@ -1240,8 +1223,7 @@ mod serialize {
                 }
 
                 if let Some(value) = serde_slot.value {
-                    let kd = unsafe {key_data(i as u32, serde_slot.version)};
-                    keys.push(kd.into());
+                    keys.push(checked_key(i as u32, serde_slot.version));
                     values.push(value);
                     slots.push(Slot {
                         version: serde_slot.version,

@@ -1,7 +1,6 @@
 //! Contains the secondary map implementation.
 //! 修改： 非空槽位不一定是奇数，也可以是偶数（不在配合slotmap使用）
 
-#[cfg(all(nightly, any(doc, feature = "unstable")))]
 use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 use core::hint::unreachable_unchecked;
@@ -12,7 +11,7 @@ use core::mem::replace;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
-use pi_key_alloter::{is_older_version, Key, KeyData, key_data};
+use crate::{is_older_version, Key, KeyData};
 
 // This representation works because we don't have to store the versions
 // of removed elements.
@@ -50,7 +49,7 @@ impl<T> Slot<T> {
     pub fn version(&self) -> u32 {
         match self {
             Occupied { version, .. } => *version,
-            Vacant => std::u32::MAX,
+            Vacant => 0,
         }
     }
 
@@ -100,7 +99,7 @@ impl<T> Slot<T> {
 /// Example usage:
 ///
 /// ```
-/// # use slotmap::*;
+/// # use pi_slotmap::*;
 /// let mut players = SlotMap::new();
 /// let mut health = SecondaryMap::new();
 /// let mut ammo = SecondaryMap::new();
@@ -130,7 +129,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sec: SecondaryMap<DefaultKey, i32> = SecondaryMap::new();
     /// ```
     pub fn new() -> Self {
@@ -147,7 +146,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm: SlotMap<_, i32> = SlotMap::with_capacity(10);
     /// let mut sec: SecondaryMap<DefaultKey, i32> = SecondaryMap::with_capacity(sm.capacity());
     /// ```
@@ -166,7 +165,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let k = sm.insert(4);
     /// let mut squared = SecondaryMap::new();
@@ -183,7 +182,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sec: SecondaryMap<DefaultKey, i32> = SecondaryMap::new();
     /// assert!(sec.is_empty());
     /// ```
@@ -197,7 +196,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sec: SecondaryMap<DefaultKey, i32> = SecondaryMap::with_capacity(10);
     /// assert!(sec.capacity() >= 10);
     /// ```
@@ -220,7 +219,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sec: SecondaryMap<DefaultKey, i32> = SecondaryMap::with_capacity(10);
     /// assert!(sec.capacity() >= 10);
     /// sec.set_capacity(1000);
@@ -245,7 +244,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sec: SecondaryMap<DefaultKey, i32> = SecondaryMap::with_capacity(10);
     /// assert!(sec.capacity() >= 10);
     /// sec.try_set_capacity(1000).unwrap();
@@ -268,7 +267,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let k = sm.insert(4);
     /// let mut squared = SecondaryMap::new();
@@ -278,9 +277,8 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// ```
     pub fn contains_key(&self, key: K) -> bool {
         let kd = key.data();
-        self.slots
-            .get(kd.index() as usize)
-            .map_or(false, |slot| slot.version() == kd.version())
+        matches!(self.slots.get(kd.index() as usize),
+            Some(Occupied { version, .. }) if *version == kd.version())
     }
 
     /// Inserts a value into the secondary map at the given `key`. Can silently
@@ -293,7 +291,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let k = sm.insert(4);
     /// let mut squared = SecondaryMap::new();
@@ -313,7 +311,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
             .extend((self.slots.len()..=kd.index() as usize).map(|_| Slot::new_vacant()));
 
         let slot = &mut self.slots[kd.index() as usize];
-        if slot.version() == kd.version() {
+        if slot.occupied() && slot.version() == kd.version() {
             // Is always occupied.
             return Some(replace(unsafe { slot.get_unchecked_mut() }, value));
         }
@@ -339,7 +337,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut squared = SecondaryMap::new();
     /// let k = sm.insert(4);
@@ -360,7 +358,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     pub fn remove(&mut self, key: K) -> Option<V> {
         let kd = key.data();
         if let Some(slot) = self.slots.get_mut(kd.index() as usize) {
-            if slot.version() == kd.version() {
+            if slot.occupied() && slot.version() == kd.version() {
                 self.num_elems -= 1;
                 return replace(slot, Slot::new_vacant()).into_option();
             }
@@ -380,7 +378,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -401,7 +399,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if let Occupied { value, version } = slot {
-                let key = unsafe { key_data(i as u32, *version).into() };
+                let key = KeyData::new(i as u32, *version).into();
                 if !f(key, value) {
                     self.num_elems -= 1;
                     *slot = Slot::new_vacant();
@@ -418,7 +416,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     /// for i in 0..10 {
@@ -446,7 +444,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::iter::FromIterator;
     /// let mut sm = SlotMap::new();
     /// let k = sm.insert(0);
@@ -465,7 +463,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("foo");
     /// let mut sec = SecondaryMap::new();
@@ -478,7 +476,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
         let kd = key.data();
         self.slots
             .get(kd.index() as usize)
-            .filter(|slot| slot.version() == kd.version())
+            .filter(|slot| slot.occupied() && slot.version() == kd.version())
             .map(|slot| unsafe { slot.get_unchecked() })
     }
 
@@ -493,7 +491,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("foo");
     /// let mut sec = SecondaryMap::new();
@@ -513,7 +511,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("test");
     /// let mut sec = SecondaryMap::new();
@@ -527,7 +525,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
         let kd = key.data();
         self.slots
             .get_mut(kd.index() as usize)
-            .filter(|slot| slot.version() == kd.version())
+            .filter(|slot| slot.occupied() && slot.version() == kd.version())
             .map(|slot| unsafe { slot.get_unchecked_mut() })
     }
 
@@ -542,7 +540,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let key = sm.insert("foo");
     /// let mut sec = SecondaryMap::new();
@@ -566,7 +564,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     /// let ka = sm.insert(()); sec.insert(ka, "butter");
@@ -582,54 +580,22 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// ```
     #[cfg(has_min_const_generics)]
     pub fn get_disjoint_mut<const N: usize>(&mut self, keys: [K; N]) -> Option<[&mut V; N]> {
-        // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
-        // safe because the type we are claiming to have initialized here is a
-        // bunch of `MaybeUninit`s, which do not require initialization.
-        let mut ptrs: [MaybeUninit<*mut V>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-        let mut slot_versions: [MaybeUninit<u32>; N] =
-            unsafe { MaybeUninit::uninit().assume_init() };
-
-        let mut i = 0;
-        while i < N {
-            let kd = keys[i].data();
-
-            match self.slots.get_mut(kd.index() as usize) {
-                Some(Occupied { version, value }) if *version == kd.version() => {
-                    // This key is valid, and the slot is occupied. Temporarily
-                    // set the version to 2 so duplicate keys would show up as
-                    // invalid, since keys always have an odd version. This
-                    // gives us a linear time disjointness check.
-                    ptrs[i] = MaybeUninit::new(&mut *value);
-                    slot_versions[i] = MaybeUninit::new(*version);
-					// 暂时设置为u32的最大值， 因此，如果真的有一个版本号u32最大值的key，这里实际上存在bug，无法正确比较key是否相交
-                    *version = std::u32::MAX;
-                },
-
-                _ => break,
-            }
-
-            i += 1;
-        }
-
-        // Undo temporary unoccupied markings.
-        for j in 0..i {
-            let idx = keys[j].data().index() as usize;
-            unsafe {
-                match self.slots.get_mut(idx) {
-                    Some(Occupied { version, .. }) => {
-                        *version = slot_versions[j].assume_init();
-                    },
-                    _ => unreachable_unchecked(),
-                }
+        let data = keys.map(|key| key.data());
+        for (i, kd) in data.iter().enumerate() {
+            if !matches!(self.slots.get(kd.index() as usize),
+                Some(Occupied { version, .. }) if *version == kd.version())
+                || data[..i].iter().any(|prior| prior.index() == kd.index()) {
+                return None;
             }
         }
-
-        if i == N {
-            // All were valid and disjoint.
-            Some(unsafe { core::mem::transmute_copy::<_, [&mut V; N]>(&ptrs) })
-        } else {
-            None
-        }
+        let slots = self.slots.as_mut_ptr();
+        // Index uniqueness is checked before creating any mutable references.
+        Some(data.map(|kd| unsafe {
+            match &mut *slots.add(kd.index() as usize) {
+                Occupied { value, .. } => value,
+                Vacant => unreachable_unchecked(),
+            }
+        }))
     }
 
     /// Returns mutable references to the values corresponding to the given
@@ -645,7 +611,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     /// let ka = sm.insert(()); sec.insert(ka, "butter");
@@ -660,12 +626,11 @@ impl<K: Key, V> SecondaryMap<K, V> {
         &mut self,
         keys: [K; N],
     ) -> [&mut V; N] {
-        // Safe, see get_disjoint_mut.
-        let mut ptrs: [MaybeUninit<*mut V>; N] = MaybeUninit::uninit().assume_init();
-        for i in 0..N {
-            ptrs[i] = MaybeUninit::new(self.get_unchecked_mut(keys[i]));
-        }
-        core::mem::transmute_copy::<_, [&mut V; N]>(&ptrs)
+        let slots = self.slots.as_mut_ptr();
+        keys.map(|key| match &mut *slots.add(key.data().index() as usize) {
+            Occupied { value, .. } => value,
+            Vacant => unreachable_unchecked(),
+        })
     }
 
     /// An iterator visiting all key-value pairs in arbitrary order. The
@@ -677,7 +642,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     /// let k0 = sm.insert(0); sec.insert(k0, 10);
@@ -706,7 +671,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     /// let k0 = sm.insert(1); sec.insert(k0, 10);
@@ -740,7 +705,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
@@ -764,7 +729,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
@@ -788,7 +753,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// # use std::collections::HashSet;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
@@ -813,7 +778,7 @@ impl<K: Key, V> SecondaryMap<K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     /// let k = sm.insert(1);
@@ -833,13 +798,13 @@ impl<K: Key, V> SecondaryMap<K, V> {
             .extend((self.slots.len()..=kd.index() as usize).map(|_| Slot::new_vacant()));
 
         let slot = unsafe { self.slots.get_unchecked(kd.index() as usize) };
-        if kd.version() == slot.version() {
+        if slot.occupied() && kd.version() == slot.version() {
             Some(Entry::Occupied(OccupiedEntry {
                 map: self,
                 kd,
                 _k: PhantomData,
             }))
-        } else if is_older_version(kd.version(), slot.version()) {
+        } else if slot.occupied() && is_older_version(kd.version(), slot.version()) {
             None
         } else {
             Some(Entry::Vacant(VacantEntry {
@@ -954,7 +919,7 @@ impl<'a, K: Key, V> Entry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -975,7 +940,7 @@ impl<'a, K: Key, V> Entry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -995,7 +960,7 @@ impl<'a, K: Key, V> Entry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec: SecondaryMap<_, ()> = SecondaryMap::new();
     ///
@@ -1016,7 +981,7 @@ impl<'a, K: Key, V> Entry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1047,7 +1012,7 @@ impl<'a, K: Key, V: Default> Entry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec: SecondaryMap<_, Option<i32>> = SecondaryMap::new();
     ///
@@ -1066,7 +1031,7 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
+    /// # use pi_slotmap::*;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1083,8 +1048,8 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1105,8 +1070,8 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1129,8 +1094,8 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1156,8 +1121,8 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1184,8 +1149,8 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
     ///
@@ -1207,8 +1172,8 @@ impl<'a, K: Key, V> OccupiedEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     ///
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
@@ -1238,8 +1203,8 @@ impl<'a, K: Key, V> VacantEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     ///
     /// let mut sm = SlotMap::new();
     /// let mut sec: SecondaryMap<_, ()> = SecondaryMap::new();
@@ -1260,8 +1225,8 @@ impl<'a, K: Key, V> VacantEntry<'a, K, V> {
     /// # Examples
     ///
     /// ```
-    /// # use slotmap::*;
-    /// # use slotmap::secondary::Entry;
+    /// # use pi_slotmap::*;
+    /// # use pi_slotmap::secondary::Entry;
     ///
     /// let mut sm = SlotMap::new();
     /// let mut sec = SecondaryMap::new();
@@ -1385,7 +1350,7 @@ impl<'a, K: Key, V> Iterator for Drain<'a, K, V> {
             self.cur += 1;
             if let Occupied { value, version } = replace(slot, Slot::new_vacant()) {
                 self.sm.num_elems -= 1;
-                let key = unsafe { key_data(idx as u32, version).into() };
+                let key = KeyData::new(idx as u32, version).into();
                 return Some((key, value));
             }
         }
@@ -1411,7 +1376,7 @@ impl<K: Key, V> Iterator for IntoIter<K, V> {
         while let Some((idx, mut slot)) = self.slots.next() {
             if let Occupied { value, version } = replace(&mut slot, Slot::new_vacant()) {
                 self.num_left -= 1;
-                let key = unsafe { key_data(idx as u32, version).into() };
+                let key = KeyData::new(idx as u32, version).into();
                 return Some((key, value));
             }
         }
@@ -1431,7 +1396,7 @@ impl<'a, K: Key, V> Iterator for Iter<'a, K, V> {
         while let Some((idx, slot)) = self.slots.next() {
             if let Occupied { value, version } = slot {
                 self.num_left -= 1;
-                let key = unsafe { key_data(idx as u32, *version).into() };
+                let key = KeyData::new(idx as u32, *version).into();
                 return Some((key, value));
             }
         }
@@ -1450,7 +1415,7 @@ impl<'a, K: Key, V> Iterator for IterMut<'a, K, V> {
     fn next(&mut self) -> Option<(K, &'a mut V)> {
         while let Some((idx, slot)) = self.slots.next() {
             if let Occupied { value, version } = slot {
-                let key = unsafe { key_data(idx as u32, *version).into() };
+                let key = KeyData::new(idx as u32, *version).into();
                 self.num_left -= 1;
                 return Some((key, value));
             }
@@ -1588,11 +1553,9 @@ mod serialize {
             D: Deserializer<'de>,
         {
             let serde_slot: SerdeSlot<T> = Deserialize::deserialize(deserializer)?;
-            // let occupied = serde_slot.version % 2 == 1;
-            // if occupied ^ serde_slot.value.is_some() {
-            //     return Err(de::Error::custom(&"inconsistent occupation in Slot"));
-            // }
-
+            if serde_slot.value.is_none() && serde_slot.version != 0 {
+                return Err(de::Error::custom("inconsistent occupation in Slot"));
+            }
             Ok(match serde_slot.value {
                 Some(value) => Self::new_occupied(serde_slot.version, value),
                 None => Self::new_vacant(),

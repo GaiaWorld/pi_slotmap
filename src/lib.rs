@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://docs.rs/slotmap/1.0.6")]
+#![doc(html_root_url = "https://docs.rs/slotmap/1.1.1")]
 #![crate_name = "pi_slotmap"]
 #![cfg_attr(all(nightly, feature = "unstable"), feature(try_reserve))]
 #![cfg_attr(all(not(test), not(feature = "std")), no_std)]
@@ -31,7 +31,6 @@
         missing_errors_doc,
         must_use_candidate
     ))]
-    #![feature(trait_alias)]
 //! # slotmap
 //!
 //! This library provides a container with persistent unique keys to access
@@ -52,12 +51,12 @@
 //! stored in slot maps, without hashing required - it's direct indexing under
 //! the hood.
 //!
-//! The minimum required stable Rust version for this crate is 1.49.
+//! The constant-generic `SlotMap` API requires Rust 1.51 or later.
 //!
 //! # Examples
 //!
 //! ```
-//! # use slotmap::*;
+//! # use pi_slotmap::*;
 //! let mut sm = SlotMap::new();
 //! let foo = sm.insert("foo");  // Key generated on insert.
 //! let bar = sm.insert("bar");
@@ -79,16 +78,11 @@
 //!
 //! # Serialization through [`serde`], [`no_std`] support and unstable features
 //!
-//! Both keys and the slot maps have full (de)seralization support through
-//! the [`serde`] library. A key remains valid for a slot map even after one or
-//! both have been serialized and deserialized! This makes storing or
-//! transferring complicated referential structures and graphs a breeze. Care has
-//! been taken such that deserializing keys and slot maps from untrusted sources
-//! is safe. If you wish to use these features you must enable the `serde`
-//! feature flag for `slotmap` in your `Cargo.toml`.
+//! The maps support (de)serialization through [`serde`] when the `serde`
+//! feature is enabled; this also enables serialization for keys from `pi_key`.
 //!
 //! ```text
-//! slotmap = { version = "1.0", features = ["serde"] }
+//! pi_slotmap = { version = "0.6", features = ["serde"] }
 //! ```
 //!
 //! This crate also supports [`no_std`] environments, but does require the
@@ -96,12 +90,11 @@
 //! `std` feature that is enabled by default:
 //!
 //! ```text
-//! slotmap = { version = "1.0", default-features = false }
+//! pi_slotmap = { version = "0.6", default-features = false }
 //! ```
 //!
-//! Unfortunately [`SparseSecondaryMap`] is not available in [`no_std`], because
-//! it relies on [`HashMap`]. Finally the `unstable` feature can be defined to
-//! enable the parts of `slotmap` that only work on nightly Rust.
+//! [`SparseSecondaryMap`] and [`DelaySlotMap`] require `std`. The
+//! `unstable` feature is retained for compatibility.
 //!
 //! # Why not index a [`Vec`], or use [`slab`], [`stable-vec`], etc?
 //!
@@ -118,15 +111,16 @@
 //!
 //! Insertion, access and deletion is all O(1) with low overhead by storing the
 //! elements inside a [`Vec`]. Unlike references or indices into a vector,
-//! unless you remove a key it is never invalidated. Behind the scenes each
+//! keys remain valid until removal or an explicit change to their reserved bits. Behind the scenes each
 //! slot in the vector is a `(value, version)` tuple. After insertion the
 //! returned key also contains a version. Only when the stored version and
 //! version in a key match is a key valid. This allows us to reuse space in the
 //! vector after deletion without letting removed keys point to spurious new
-//! elements. <sup>*</sup>After 2<sup>31</sup> deletions and insertions to the
-//! same underlying slot the version wraps around and such a spurious reference
-//! could potentially occur. It is incredibly unlikely however, and in all
-//! circumstances is the behavior safe. A slot map can hold up to
+//! elements. <sup>*</sup>For the default `SlotMap<K, V, 0>`, versions repeat after
+//! 2<sup>31</sup> removal/reuse cycles of one slot. With `N` reserved bits and
+//! unchanged low bits, the period is 2<sup>31-N</sup> cycles. Trimming trailing
+//! slots with `shrink_to_last_occupied` also discards version history and may
+//! recreate removed keys on subsequent insertion. A slot map can hold up to
 //! 2<sup>32</sup> - 2 elements at a time.
 //!
 //! The memory usage for each slot in [`SlotMap`] is `4 + max(sizeof(T), 4)`
@@ -136,11 +130,13 @@
 //!
 //! # Choosing [`SlotMap`], [`HopSlotMap`] or [`DenseSlotMap`]
 //!
-//! A [`SlotMap`] is the fastest for most operations, except iteration. It can
-//! never shrink the size of its underlying storage, because it must remember
-//! for each storage slot what the latest stored version was, even if the slot
-//! is empty now. This means that iteration can be slow as it must iterate over
-//! potentially a lot of empty slots.
+//! A [`SlotMap`] is the fastest for most operations, except iteration. It
+//! normally keeps vacant slots to preserve their versions, so iteration may
+//! scan many empty slots. `compact()` rebuilds the free list in ascending index
+//! order without moving values or dropping versions. `shrink_to_fit()` releases
+//! only unused vector capacity. `shrink_to_last_occupied()` additionally removes
+//! trailing vacant slots; the caller must handle the lost version history,
+//! reserved bits, stale keys, and secondary-map associations.
 //!
 //! [`HopSlotMap`] solves this by maintaining more information on
 //! insertion/removal, allowing it to iterate only over filled slots by 'hopping
@@ -155,6 +151,22 @@
 //! contain indices used to access the contiguous memory. This means random
 //! access is slower than both [`SlotMap`] and [`HopSlotMap`], but iteration is
 //! significantly faster, as fast as a normal [`Vec`].
+//!
+//! # Reserved version bits in [`SlotMap`]
+//!
+//! `SlotMap<K, V, const N: u32 = 0>` reserves the low `N` version bits for the
+//! caller. Bit `N` is the occupation bit. Removal and reuse each add `1 << N`
+//! with wrapping arithmetic, preserving the low bits. `N` must be below 32.
+//! Use `SlotMap::<DefaultKey, Value, N>::with_key()` for a nonzero `N`.
+//!
+//! `set_key_bits(key, bits)` returns the updated key; changing bits makes the
+//! old key fail strict lookups. Update any copies and secondary-map entries.
+//! `get_key_bits(index)` reads occupied-slot bits without validating generation;
+//! reconstructing a key must retain its original high generation bits. Changing
+//! bits back can make an earlier key from the same generation match again.
+//! Serialization keeps full versions but not `N`; deserialize with the same `N`.
+//! These options apply to ordinary `SlotMap`, not `HopSlotMap`, `DenseSlotMap`,
+//! or `DelaySlotMap`.
 //!
 //! # Choosing [`SecondaryMap`] or [`SparseSecondaryMap`]
 //!
@@ -186,7 +198,7 @@
 //! would use:
 //!
 //! ```
-//! # use slotmap::*;
+//! # use pi_slotmap::*;
 //! # #[derive(Copy, Clone)]
 //! # struct Player;
 //! new_key_type! { struct PlayerKey; }
@@ -216,6 +228,7 @@ pub mod __impl {
 
 pub mod basic;
 pub mod dense;
+#[cfg(feature = "std")]
 pub mod delay;
 pub mod hop;
 pub mod secondary;
@@ -224,12 +237,20 @@ pub mod sparse_secondary;
 pub(crate) mod util;
 
 
-pub use pi_key_alloter::{new_key_type, Key, DefaultKey, KeyData, is_older_version};
+pub use pi_key::{new_key_type, Key, DefaultKey, KeyData, is_older_version};
+
+pub(crate) fn checked_key<K: Key>(index: u32, version: u32) -> K {
+    let data = KeyData::new(index, version);
+    let key = K::from(data);
+    assert_eq!(key.data(), data, "pi_slotmap key must preserve index and generation");
+    key
+}
 
 #[doc(inline)]
 pub use crate::basic::SlotMap;
 #[doc(inline)]
 pub use crate::dense::DenseSlotMap;
+#[cfg(feature = "std")]
 #[doc(inline)]
 pub use crate::delay::DelaySlotMap;
 #[doc(inline)]
@@ -260,6 +281,255 @@ impl<T> Slottable for T {}
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
+    thread_local! {
+        static KEY_READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    struct ChangingKey {
+        data: crate::KeyData,
+        alternate: u32,
+    }
+
+    impl From<crate::KeyData> for ChangingKey {
+        fn from(data: crate::KeyData) -> Self {
+            Self { data, alternate: 0 }
+        }
+    }
+
+    impl pi_null::Null for ChangingKey {
+        fn null() -> Self { Self::default() }
+        fn is_null(&self) -> bool { self.data.index() == u32::MAX }
+    }
+
+    impl crate::Key for ChangingKey {
+        fn with(idx: usize) -> Self {
+            Self::from(crate::KeyData::new(idx as u32, 0))
+        }
+        fn data(&self) -> crate::KeyData {
+            if self.alternate != 0 && KEY_READS.with(|reads| {
+                let n = reads.get();
+                reads.set(n + 1);
+                n > 0
+            }) {
+                crate::KeyData::new(self.alternate, self.data.version())
+            } else {
+                self.data
+            }
+        }
+        fn index(&self) -> usize { self.data.index() as usize }
+    }
+
+    #[test]
+    fn key_data_preserves_full_slot_version() {
+        use super::*;
+        let version = (1 << 21) | 1;
+        assert_eq!(KeyData::new(1, version).version(), version);
+        assert_eq!(checked_key::<DefaultKey>(1, version).data().version(), version);
+    }
+
+    #[test]
+    fn primary_rejects_index_only_keys_before_value_callback() {
+        use super::*;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut basic = SlotMap::<usize, i32>::with_key();
+        let invoked = Cell::new(false);
+        assert!(catch_unwind(AssertUnwindSafe(|| basic.insert_with_key(|_| {
+            invoked.set(true);
+            1
+        }))).is_err());
+        assert!(!invoked.get());
+        assert_eq!(basic.len(), 0);
+        assert!(basic.is_empty());
+
+        let mut dense = DenseSlotMap::<usize, i32>::with_key();
+        invoked.set(false);
+        assert!(catch_unwind(AssertUnwindSafe(|| dense.insert_with_key(|_| {
+            invoked.set(true);
+            1
+        }))).is_err());
+        assert!(!invoked.get());
+        assert_eq!(dense.len(), 0);
+
+        let mut hop = HopSlotMap::<usize, i32>::with_key();
+        invoked.set(false);
+        assert!(catch_unwind(AssertUnwindSafe(|| hop.insert_with_key(|_| {
+            invoked.set(true);
+            1
+        }))).is_err());
+        assert!(!invoked.get());
+        assert_eq!(hop.len(), 0);
+
+        // 标准库特性（std feature）关闭时仍核验其余主容器（primary map）。
+        #[cfg(feature = "std")]
+        {
+            let mut delay = DelaySlotMap::<usize, i32>::with_key();
+            invoked.set(false);
+            assert!(catch_unwind(AssertUnwindSafe(|| delay.insert_with_key(|_| {
+                invoked.set(true);
+                1
+            }))).is_err());
+            assert!(!invoked.get());
+            assert_eq!(delay.len(), 0);
+            assert!(catch_unwind(AssertUnwindSafe(|| delay.reserve_entity())).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| unsafe {
+                delay.flush(|_, _| invoked.set(true));
+            })).is_ok());
+            assert!(!invoked.get());
+        }
+    }
+
+    #[test]
+    fn rejected_index_keys_do_not_affect_other_maps() {
+        use super::*;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let mut basic = SlotMap::<DefaultKey, i32>::new();
+        let key = basic.insert(1);
+        basic.remove(key);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let mut invalid = SlotMap::<usize, i32>::with_key();
+            invalid.insert(1);
+        })).is_err());
+        assert_eq!(basic.len(), 0);
+
+        let mut dense = DenseSlotMap::<DefaultKey, i32>::new();
+        let key = dense.insert(1);
+        dense.remove(key);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let mut invalid = DenseSlotMap::<usize, i32>::with_key();
+            invalid.insert(1);
+        })).is_err());
+        assert_eq!(dense.len(), 0);
+
+        let mut hop = HopSlotMap::<DefaultKey, i32>::new();
+        let key = hop.insert(1);
+        hop.remove(key);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let mut invalid = HopSlotMap::<usize, i32>::with_key();
+            invalid.insert(1);
+        })).is_err());
+        assert_eq!(hop.len(), 0);
+
+        #[cfg(feature = "std")]
+        {
+            let mut delay = DelaySlotMap::<DefaultKey, i32>::new();
+            let key = delay.insert(1);
+            delay.remove(key);
+            assert!(catch_unwind(AssertUnwindSafe(|| {
+                let mut invalid = DelaySlotMap::<usize, i32>::with_key();
+                invalid.insert(1);
+            })).is_err());
+            assert_eq!(delay.len(), 0);
+        }
+    }
+
+    #[test]
+    fn disjoint_reads_stateful_key_once() {
+        use super::*;
+        let mut map = SlotMap::<ChangingKey, i32>::with_key();
+        let first = map.insert(10);
+        let second = map.insert(20);
+        let first_data = first.data();
+        let second_data = second.data();
+        let changing = ChangingKey { data: first_data, alternate: second_data.index() };
+        KEY_READS.with(|reads| reads.set(0));
+        let [a, b] = map.get_disjoint_mut([changing, second]).unwrap();
+        *a += 1;
+        *b += 1;
+        assert_eq!(KEY_READS.with(Cell::get), 1);
+        assert_eq!(map.get(first), Some(&11));
+        assert_eq!(map.get(second), Some(&21));
+        KEY_READS.with(|reads| reads.set(0));
+        assert!(map.get_disjoint_mut([changing, first]).is_none());
+        assert_eq!(map.get(first), Some(&11));
+
+        let mut dense = DenseSlotMap::<ChangingKey, i32>::with_key();
+        let first = dense.insert(10);
+        let second = dense.insert(20);
+        let changing = ChangingKey { data: first.data(), alternate: second.data().index() };
+        KEY_READS.with(|reads| reads.set(0));
+        let [a, b] = dense.get_disjoint_mut([changing, second]).unwrap();
+        *a += 1;
+        *b += 1;
+        assert_eq!(KEY_READS.with(Cell::get), 1);
+        assert_eq!(dense.get(first), Some(&11));
+        assert_eq!(dense.get(second), Some(&21));
+        KEY_READS.with(|reads| reads.set(0));
+        assert!(dense.get_disjoint_mut([changing, first]).is_none());
+        assert_eq!(dense.get(first), Some(&11));
+
+        let mut hop = HopSlotMap::<ChangingKey, i32>::with_key();
+        let first = hop.insert(10);
+        let second = hop.insert(20);
+        let changing = ChangingKey { data: first.data(), alternate: second.data().index() };
+        KEY_READS.with(|reads| reads.set(0));
+        let [a, b] = hop.get_disjoint_mut([changing, second]).unwrap();
+        *a += 1;
+        *b += 1;
+        assert_eq!(KEY_READS.with(Cell::get), 1);
+        assert_eq!(hop.get(first), Some(&11));
+        assert_eq!(hop.get(second), Some(&21));
+        KEY_READS.with(|reads| reads.set(0));
+        assert!(hop.get_disjoint_mut([changing, first]).is_none());
+        assert_eq!(hop.get(first), Some(&11));
+
+        #[cfg(feature = "std")]
+        let (first, second) = {
+            let mut delay = DelaySlotMap::<ChangingKey, i32>::with_key();
+            let first = delay.insert(10);
+            let second = delay.insert(20);
+            let changing = ChangingKey { data: first.data(), alternate: second.data().index() };
+            KEY_READS.with(|reads| reads.set(0));
+            let [a, b] = delay.get_disjoint_mut([changing, second]).unwrap();
+            *a += 1;
+            *b += 1;
+            assert_eq!(KEY_READS.with(Cell::get), 1);
+            assert_eq!(delay.get(first), Some(&11));
+            assert_eq!(delay.get(second), Some(&21));
+            KEY_READS.with(|reads| reads.set(0));
+            assert!(delay.get_disjoint_mut([changing, first]).is_none());
+            assert_eq!(delay.get(first), Some(&11));
+            (first, second)
+        };
+
+        let first_data = first.data();
+        let second_data = second.data();
+        let mut secondary = SecondaryMap::<ChangingKey, i32>::new();
+        secondary.insert(first, 10);
+        secondary.insert(second, 20);
+        let changing = ChangingKey { data: first_data, alternate: second_data.index() };
+        KEY_READS.with(|reads| reads.set(0));
+        let [a, b] = secondary.get_disjoint_mut([changing, second]).unwrap();
+        *a += 1;
+        *b += 1;
+        assert_eq!(KEY_READS.with(Cell::get), 1);
+        assert_eq!(secondary.get(first), Some(&11));
+        assert_eq!(secondary.get(second), Some(&21));
+        KEY_READS.with(|reads| reads.set(0));
+        assert!(secondary.get_disjoint_mut([changing, first]).is_none());
+        assert_eq!(secondary.get(first), Some(&11));
+
+        #[cfg(feature = "std")]
+        {
+            let mut sparse = SparseSecondaryMap::<ChangingKey, i32>::new();
+            sparse.insert(first, 10);
+            sparse.insert(second, 20);
+            let changing = ChangingKey { data: first_data, alternate: second_data.index() };
+            KEY_READS.with(|reads| reads.set(0));
+            let [a, b] = sparse.get_disjoint_mut([changing, second]).unwrap();
+            *a += 1;
+            *b += 1;
+            assert_eq!(KEY_READS.with(Cell::get), 1);
+            assert_eq!(sparse.get(first), Some(&11));
+            assert_eq!(sparse.get(second), Some(&21));
+            KEY_READS.with(|reads| reads.set(0));
+            assert!(sparse.get_disjoint_mut([changing, first]).is_none());
+            assert_eq!(sparse.get(first), Some(&11));
+        }
+    }
     // Intentionally no `use super::*;` because we want to test macro expansion
     // in the *users* scope, which might not have that.
     #[test]
@@ -291,9 +561,143 @@ mod tests {
         let is_older = |a, b| is_older_version(a, b);
         assert!(!is_older(42, 42));
         assert!(is_older(0, 1));
-        assert!(is_older(0, 1 << 31));
+        assert!(!is_older(0, 1 << 31)); // Exactly half a cycle is ambiguous.
         assert!(!is_older(0, (1 << 31) + 1));
         assert!(is_older(u32::MAX, 0));
+    }
+
+    #[test]
+    fn reattach_rejects_occupied_slots() {
+        use super::*;
+
+        fn check<const N: u32>() {
+            let mut map = SlotMap::<DefaultKey, u32, N>::with_key();
+            // This value has the same representation as the detached marker.
+            let key = map.insert(u32::MAX);
+            let wrong: DefaultKey = KeyData::new(
+                key.data().index(),
+                key.data().version().wrapping_sub(1u32 << N),
+            )
+            .into();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                map.reattach(wrong, 42);
+            }));
+            assert_eq!((map.len(), map.get(key).copied()), (1, Some(u32::MAX)));
+            assert!(result.is_err());
+
+            assert_eq!(map.detach(key), Some(u32::MAX));
+            assert_eq!(map.len(), 0);
+            map.reattach(key, u32::MAX);
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.get(key), Some(&u32::MAX));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                map.reattach(key, 42);
+            }));
+            assert!(result.is_err());
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.remove(key), Some(u32::MAX));
+            assert!(map.is_empty());
+        }
+
+        check::<0>();
+        check::<2>();
+        check::<31>();
+    }
+
+    #[test]
+    fn detached_keys_and_even_secondary_versions() {
+        use super::*;
+        let mut basic = SlotMap::new();
+        let key = basic.insert(3);
+        assert_eq!(basic.detach(key), Some(3));
+        assert!(!basic.contains_key(key));
+        assert_eq!(basic.get(key), None);
+        basic.reattach(key, 4);
+        assert_eq!(basic.remove(key), Some(4));
+
+        let mut dense = DenseSlotMap::new();
+        let key = dense.insert(5);
+        assert_eq!(dense.detach(key), Some(5));
+        assert_eq!(dense.get(key), None);
+        dense.reattach(key, 6);
+        assert_eq!(dense.as_slices(), (&[key][..], &[6][..]));
+
+        let even: DefaultKey = KeyData::new(1, 2).into();
+        let zero: DefaultKey = KeyData::new(2, 0).into();
+        let max: DefaultKey = KeyData::new(3, u32::MAX).into();
+        let mut secondary = SecondaryMap::new();
+        assert_eq!(secondary.insert(even, 10), None);
+        assert_eq!(secondary.insert(zero, 20), None);
+        assert_eq!(secondary.insert(max, 30), None);
+        assert_eq!(secondary.get_disjoint_mut([even, even]), None);
+        assert_eq!(secondary.get_disjoint_mut([max, max]), None);
+        let [a, b, c] = secondary.get_disjoint_mut([even, zero, max]).unwrap();
+        *a += 1;
+        *b += 1;
+        *c += 1;
+        assert_eq!(secondary.get(even), Some(&11));
+        assert_eq!(secondary.get(zero), Some(&21));
+        assert_eq!(secondary.get(max), Some(&31));
+
+        #[cfg(feature = "std")]
+        {
+            let mut sparse = SparseSecondaryMap::new();
+            sparse.insert(even, 1);
+            sparse.insert(max, 2);
+            assert_eq!(sparse.get_disjoint_mut([max, max]), None);
+            let [a, b] = sparse.get_disjoint_mut([even, max]).unwrap();
+            *a += 3;
+            *b += 3;
+            assert_eq!(sparse.get(max), Some(&5));
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn delay_reused_slot_survives_failed_insertion() {
+        use super::*;
+        let mut map = DelaySlotMap::new();
+        let old = map.insert(1);
+        assert_eq!(map.remove(old), Some(1));
+        assert!(map.try_insert_with_key::<_, ()>(|_| Err(())).is_err());
+        let reused = map.insert(2);
+        assert_eq!(reused.data().index(), old.data().index());
+        assert_eq!(map.get(reused), Some(&2));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn secondary_serde_preserves_even_and_zero_versions() {
+        use super::*;
+        let even: DefaultKey = KeyData::new(1, 2).into();
+        let zero: DefaultKey = KeyData::new(2, 0).into();
+        let mut map = SecondaryMap::new();
+        map.insert(even, 10);
+        map.insert(zero, 20);
+        let json = serde_json::to_string(&map).unwrap();
+        let restored: SecondaryMap<DefaultKey, i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.get(even), Some(&10));
+        assert_eq!(restored.get(zero), Some(&20));
+        #[cfg(feature = "std")]
+        {
+            let sparse: SparseSecondaryMap<DefaultKey, i32> = serde_json::from_str(&json).unwrap();
+            assert_eq!(sparse.get(zero), Some(&20));
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip_keeps_keys_embedded_in_values() {
+        use super::*;
+
+        let mut map = SlotMap::new();
+        let first = map.insert_with_key(|key| (key, 10));
+        let second = map.insert((first, 20));
+        let json = serde_json::to_string(&map).unwrap();
+        let restored: SlotMap<DefaultKey, (DefaultKey, i32)> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.get(first), Some(&(first, 10)));
+        assert_eq!(restored.get(second), Some(&(first, 20)));
     }
 
     #[test]
@@ -303,11 +707,13 @@ mod tests {
         struct NoClone;
 
         let mut sm = SlotMap::new();
-        let mut hsm = HopSlotMap::new();
+        let mut hsm = HopSlotMap::<DefaultKey, NoClone>::new();
         let mut dsm = DenseSlotMap::new();
         let mut scm = SecondaryMap::new();
+        #[cfg(feature = "std")]
         let mut sscm = SparseSecondaryMap::new();
         scm.insert(sm.insert(NoClone), NoClone);
+        #[cfg(feature = "std")]
         sscm.insert(hsm.insert(NoClone), NoClone);
         dsm.insert(NoClone);
 
@@ -323,26 +729,12 @@ mod tests {
         let _ = scm.keys().clone();
         let _ = scm.values().clone();
         let _ = scm.iter().clone();
+        #[cfg(feature = "std")]
         let _ = sscm.keys().clone();
+        #[cfg(feature = "std")]
         let _ = sscm.values().clone();
+        #[cfg(feature = "std")]
         let _ = sscm.iter().clone();
     }
 
-    #[cfg(feature = "serde")]
-    #[test]
-    fn key_serde() {
-        use super::*;
-
-        // Check round-trip through serde.
-        let mut sm = SlotMap::new();
-        let k = sm.insert(42);
-        let ser = serde_json::to_string(&k).unwrap();
-        let de: DefaultKey = serde_json::from_str(&ser).unwrap();
-        assert_eq!(k, de);
-
-        // Even if a malicious entity sends up even (unoccupied) versions in the
-        // key, we make the version point to the occupied version.
-        let malicious: KeyData = serde_json::from_str(&r#"{"idx":0,"version":4}"#).unwrap();
-        assert_eq!(malicious.version(), 5);
-    }
 }
