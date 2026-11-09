@@ -553,6 +553,44 @@ mod tests {
     }
 
     #[test]
+    fn reattach_rejects_occupied_slots() {
+        use super::*;
+
+        fn check<const N: u32>() {
+            let mut map = SlotMap::<DefaultKey, u32, N>::with_key();
+            // This value has the same representation as the detached marker.
+            let key = map.insert(u32::MAX);
+            let wrong: DefaultKey = KeyData::new(
+                key.data().index(),
+                key.data().version().wrapping_sub(1u32 << N),
+            )
+            .into();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                map.reattach(wrong, 42);
+            }));
+            assert_eq!((map.len(), map.get(key).copied()), (1, Some(u32::MAX)));
+            assert!(result.is_err());
+
+            assert_eq!(map.detach(key), Some(u32::MAX));
+            assert_eq!(map.len(), 0);
+            map.reattach(key, u32::MAX);
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.get(key), Some(&u32::MAX));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                map.reattach(key, 42);
+            }));
+            assert!(result.is_err());
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.remove(key), Some(u32::MAX));
+            assert!(map.is_empty());
+        }
+
+        check::<0>();
+        check::<2>();
+        check::<31>();
+    }
+
+    #[test]
     fn detached_keys_and_even_secondary_versions() {
         use super::*;
         let mut basic = SlotMap::new();

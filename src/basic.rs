@@ -598,8 +598,12 @@ impl<K: Key, V, const N: u32> SlotMap<K, V, N> {
     /// Panics if the key is not detached.
     pub fn reattach(&mut self, key: K, value: V) {
         let kd = key.data();
-        let slot = self.slots.get_mut(kd.index() as usize)
+        let slot = self
+            .slots
+            .get_mut(kd.index() as usize)
+            .filter(|slot| !slot.occupied())
             .filter(|slot| slot.version == kd.version().wrapping_add(1u32 << N))
+            // The union contains next_free only when the slot is vacant.
             .filter(|slot| unsafe { slot.u.next_free == u32::MAX })
             .expect("key is not detached");
         slot.u.value = ManuallyDrop::new(value);

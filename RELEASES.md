@@ -1,3 +1,12 @@
+Version 0.5.1 (pi_slotmap)
+=========================
+
+ - Fixed SlotMap::reattach accepting certain invalid keys for occupied slots.
+   It now checks the occupation bit before reading the detached marker,
+   preventing existing values from being overwritten and len() from increasing.
+ - Added regression coverage for invalid keys, repeated reattachment, and
+   normal detach/reattach with 0, 2, and 31 reserved version bits.
+
 Version 0.5.0 (pi_slotmap)
 =========================
 
